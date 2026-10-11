@@ -76,7 +76,10 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-              <application android:label="&#x632;&#x646;&#x62f;&#x6af;&#x6cc; &#x645;&#x646;"
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+              <application android:label="&#x632;&#x646;&#x62f;&#x6af;&#x6cc; &#x645;&#x646;" android:allowBackup="true"
                   android:theme="@android:style/Theme.Material.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
                       <intent-filter>
@@ -85,6 +88,12 @@ jobs:
                       </intent-filter>
                   </activity>
                   <receiver android:name=".AlarmReceiver" android:exported="false" />
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                      </intent-filter>
+                  </receiver>
               </application>
           </manifest>
           EOF_X
@@ -93,7 +102,6 @@ jobs:
 
           import android.app.Activity;
           import android.app.AlarmManager;
-          import android.app.PendingIntent;
           import android.content.Intent;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
@@ -108,6 +116,8 @@ jobs:
           import java.io.InputStream;
           import java.net.HttpURLConnection;
           import java.net.URL;
+          import java.util.ArrayList;
+          import java.util.Iterator;
           import org.json.JSONObject;
 
           public class MainActivity extends Activity {
@@ -152,14 +162,31 @@ jobs:
                   super.onResume();
                   if (web != null) { web.resumeTimers(); web.onResume(); }
               }
-              PendingIntent alarmIntent(String id, String title, String text) {
-                  Intent i = new Intent(this, AlarmReceiver.class);
-                  i.putExtra("title", title);
-                  i.putExtra("text", text);
-                  i.putExtra("nid", id.hashCode());
-                  int fl = PendingIntent.FLAG_UPDATE_CURRENT;
-                  if (Build.VERSION.SDK_INT >= 23) fl |= PendingIntent.FLAG_IMMUTABLE;
-                  return PendingIntent.getBroadcast(this, id.hashCode(), i, fl);
+
+              synchronized void alStore(String id, long t, String title, String text) {
+                  try {
+                      JSONObject o = new JSONObject(prefs.getString("__al", "{}"));
+                      if (t > 0) {
+                          JSONObject a = new JSONObject();
+                          a.put("t", t);
+                          a.put("ti", title);
+                          a.put("tx", text);
+                          o.put(id, a);
+                      } else {
+                          o.remove(id);
+                      }
+                      long now = System.currentTimeMillis();
+                      ArrayList<String> old = new ArrayList<String>();
+                      Iterator<String> it = o.keys();
+                      while (it.hasNext()) {
+                          String k = it.next();
+                          JSONObject a = o.optJSONObject(k);
+                          if (a == null || a.optLong("t", 0) < now) old.add(k);
+                      }
+                      for (String k : old) o.remove(k);
+                      prefs.edit().putString("__al", o.toString()).apply();
+                  } catch (Exception e) {
+                  }
               }
 
               static String read(InputStream in) throws Exception {
@@ -188,10 +215,8 @@ jobs:
                       try {
                           long t = Long.parseLong(when);
                           if (t < System.currentTimeMillis()) return;
-                          AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
-                          PendingIntent pi = alarmIntent(id, title, text);
-                          if (Build.VERSION.SDK_INT >= 23) am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, pi);
-                          else am.set(AlarmManager.RTC_WAKEUP, t, pi);
+                          AlarmReceiver.set(MainActivity.this, id, t, title, text);
+                          alStore(id, t, title, text);
                       } catch (Exception e) {
                       }
                   }
@@ -200,9 +225,27 @@ jobs:
                   public void cancelAlarm(String id) {
                       try {
                           AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
-                          am.cancel(alarmIntent(id, "", ""));
+                          am.cancel(AlarmReceiver.pi(MainActivity.this, id, "", ""));
+                          alStore(id, 0, "", "");
                       } catch (Exception e) {
                       }
+                  }
+
+                  @JavascriptInterface
+                  public void share(final String t) {
+                      runOnUiThread(new Runnable() {
+                          public void run() {
+                              try {
+                                  Intent i = new Intent(Intent.ACTION_SEND);
+                                  i.setType("text/plain");
+                                  i.putExtra(Intent.EXTRA_SUBJECT, "Life backup");
+                                  i.putExtra(Intent.EXTRA_TEXT, t);
+                                  Intent ch = Intent.createChooser(i, "Backup");
+                                  startActivity(ch);
+                              } catch (Exception e) {
+                              }
+                          }
+                      });
                   }
 
                   @JavascriptInterface
@@ -257,7 +300,6 @@ jobs:
                                   InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
                                   r.put("status", code);
                                   r.put("body", read(in));
-                                  r.put("remaining", String.valueOf(c.getHeaderField("x-requests-remaining")));
                               } catch (Exception e) {
                                   try {
                                       r.put("status", 0);
@@ -280,6 +322,7 @@ jobs:
           cat > src/main/java/com/saeed/life/AlarmReceiver.java <<'EOF_X'
           package com.saeed.life;
 
+          import android.app.AlarmManager;
           import android.app.Notification;
           import android.app.NotificationChannel;
           import android.app.NotificationManager;
@@ -290,6 +333,40 @@ jobs:
           import android.os.Build;
 
           public class AlarmReceiver extends BroadcastReceiver {
+              static PendingIntent pi(Context c, String id, String title, String text) {
+                  Intent i = new Intent(c, AlarmReceiver.class);
+                  i.putExtra("title", title);
+                  i.putExtra("text", text);
+                  i.putExtra("nid", id.hashCode());
+                  int fl = PendingIntent.FLAG_UPDATE_CURRENT;
+                  if (Build.VERSION.SDK_INT >= 23) fl |= PendingIntent.FLAG_IMMUTABLE;
+                  return PendingIntent.getBroadcast(c, id.hashCode(), i, fl);
+              }
+
+              static void set(Context c, String id, long t, String title, String text) {
+                  AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+                  if (am == null) return;
+                  PendingIntent p = pi(c, id, title, text);
+                  boolean exact = true;
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      try { exact = am.canScheduleExactAlarms(); } catch (Exception e) { exact = false; }
+                  }
+                  try {
+                      if (Build.VERSION.SDK_INT >= 23) {
+                          if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, p);
+                          else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, p);
+                      } else {
+                          am.setExact(AlarmManager.RTC_WAKEUP, t, p);
+                      }
+                  } catch (Exception e) {
+                      try {
+                          if (Build.VERSION.SDK_INT >= 23) am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, p);
+                          else am.set(AlarmManager.RTC_WAKEUP, t, p);
+                      } catch (Exception e2) {
+                      }
+                  }
+              }
+
               @Override
               public void onReceive(Context ctx, Intent in) {
                   String title = in.getStringExtra("title");
@@ -299,9 +376,10 @@ jobs:
                   if (nm == null) return;
                   Notification.Builder b;
                   if (Build.VERSION.SDK_INT >= 26) {
-                      NotificationChannel ch = new NotificationChannel("daily", "\u06cc\u0627\u062f\u0622\u0648\u0631 \u0631\u0648\u0632\u0627\u0646\u0647", NotificationManager.IMPORTANCE_HIGH);
+                      NotificationChannel ch = new NotificationChannel("alarms", "\u0622\u0644\u0627\u0631\u0645\u200c\u0647\u0627 \u0648 \u06cc\u0627\u062f\u0622\u0648\u0631\u0647\u0627", NotificationManager.IMPORTANCE_HIGH);
+                      ch.enableVibration(true);
                       nm.createNotificationChannel(ch);
-                      b = new Notification.Builder(ctx, "daily");
+                      b = new Notification.Builder(ctx, "alarms");
                   } else {
                       b = new Notification.Builder(ctx);
                       b.setPriority(Notification.PRIORITY_HIGH);
@@ -310,13 +388,44 @@ jobs:
                   Intent open = new Intent(ctx, MainActivity.class);
                   int fl = PendingIntent.FLAG_UPDATE_CURRENT;
                   if (Build.VERSION.SDK_INT >= 23) fl |= PendingIntent.FLAG_IMMUTABLE;
-                  PendingIntent pi = PendingIntent.getActivity(ctx, nid, open, fl);
-                  b.setSmallIcon(android.R.drawable.ic_dialog_info);
+                  PendingIntent p = PendingIntent.getActivity(ctx, nid, open, fl);
+                  b.setSmallIcon(android.R.drawable.ic_popup_reminder);
                   b.setContentTitle(title);
                   b.setContentText(text);
+                  b.setStyle(new Notification.BigTextStyle().bigText(text));
                   b.setAutoCancel(true);
-                  b.setContentIntent(pi);
+                  b.setContentIntent(p);
                   nm.notify(nid, b.build());
+              }
+          }
+          EOF_X
+          cat > src/main/java/com/saeed/life/BootReceiver.java <<'EOF_X'
+          package com.saeed.life;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import java.util.Iterator;
+          import org.json.JSONObject;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context c, Intent in) {
+                  try {
+                      SharedPreferences p = c.getSharedPreferences("life", Context.MODE_PRIVATE);
+                      JSONObject o = new JSONObject(p.getString("__al", "{}"));
+                      long now = System.currentTimeMillis();
+                      Iterator<String> it = o.keys();
+                      while (it.hasNext()) {
+                          String id = it.next();
+                          JSONObject a = o.optJSONObject(id);
+                          if (a == null) continue;
+                          long t = a.optLong("t", 0);
+                          if (t > now) AlarmReceiver.set(c, id, t, a.optString("ti", ""), a.optString("tx", ""));
+                      }
+                  } catch (Exception e) {
+                  }
               }
           }
           EOF_X
@@ -330,19 +439,24 @@ jobs:
           <style>
           * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
           body { margin: 0; background: #0B1A2E; color: #E6EDF6; font-family: Tahoma, sans-serif; font-size: 15px; padding-bottom: 76px; }
-          h2 { font-size: 17px; margin: 4px 0 10px; }
           h3 { font-size: 15px; margin: 4px 0 8px; color: #9FC3FF; }
-          .top { padding: 12px 14px 4px; display: flex; justify-content: space-between; align-items: center; }
-          .top .d { color: #9FB2C8; font-size: 13px; }
+          .top { padding: 10px 10px 4px; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+          .dsel { display: flex; align-items: center; gap: 4px; }
+          .dsel .db { background: #13263F; border-radius: 10px; padding: 7px 10px; font-size: 13px; }
+          .dsel .ar { background: #13263F; border-radius: 10px; padding: 7px 11px; font-size: 14px; }
           .box { background: #13263F; border-radius: 12px; padding: 12px; margin: 10px 12px; }
           .box.warn { background: #3A2A10; border: 1px solid #8A6420; }
           .box.low { background: #2A1F3A; border: 1px solid #6B4FA0; }
           .box.ok { background: #10301F; border: 1px solid #2E7D4F; }
           .box.upd { background: #12361F; border: 1px solid #2E9D5F; }
+          .box.inn { margin: 8px 0; background: #0F2138; }
           .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+          .f1 { flex: 1; min-width: 0; }
           .mut { color: #8FA3BA; font-size: 13px; }
           .sm { font-size: 12px; }
           input, textarea, select { width: 100%; background: #0B1A2E; color: #E6EDF6; border: 1px solid #2A4366; border-radius: 8px; padding: 9px; font-family: inherit; font-size: 15px; margin: 4px 0 8px; }
+          input[type=time] { direction: ltr; text-align: center; }
+          input[type=checkbox] { width: auto; margin: 0 0 0 6px; vertical-align: middle; }
           textarea { min-height: 64px; }
           label { font-size: 13px; color: #9FB2C8; }
           .btn { background: #2563EB; color: #fff; border: 0; border-radius: 9px; padding: 9px 14px; font-family: inherit; font-size: 14px; margin: 3px 0; }
@@ -355,60 +469,93 @@ jobs:
           .chip.on { background: #2563EB; border-color: #9FC3FF; }
           .task { border-top: 1px solid #22395A; padding: 9px 0; }
           .task:first-child { border-top: 0; }
-          .task .tt { flex: 1; min-width: 0; }
           .task.done .tt b { text-decoration: line-through; color: #7F93AA; }
-          .ck { width: 26px; height: 26px; border-radius: 7px; border: 2px solid #4A6A93; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; }
+          .ck { width: 28px; height: 28px; min-width: 28px; border-radius: 8px; border: 2px solid #4A6A93; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; }
           .ck.on { background: #2E9D5F; border-color: #2E9D5F; }
+          .ck.late { border-color: #C98A1E; }
           .g { font-size: 11px; border-radius: 6px; padding: 1px 6px; margin-left: 4px; }
           .gA { background: #8B2A2A; } .gB { background: #2B5FA8; } .gC { background: #3E5566; } .gD { background: #4A4A4A; }
+          .tm { font-size: 12px; background: #1F3A5C; border-radius: 6px; padding: 1px 6px; margin-left: 4px; direction: ltr; display: inline-block; }
           .bar { height: 10px; background: #0B1A2E; border-radius: 6px; overflow: hidden; margin: 6px 0; }
           .bar i { display: block; height: 100%; background: #2E9D5F; }
-          .bar i.hi { background: #C98A1E; } .bar i.ov { background: #C0392B; }
-          .nav { position: fixed; bottom: 0; left: 0; right: 0; background: #0F2138; display: flex; border-top: 1px solid #22395A; }
-          .nav div { flex: 1; text-align: center; padding: 8px 0 10px; font-size: 12px; color: #8FA3BA; }
-          .nav div span { display: block; font-size: 20px; }
+          .bar i.hi { background: #C98A1E; } .bar i.ov { background: #C0392B; } .bar i.pu { background: #8E6BD8; }
+          .nav { position: fixed; bottom: 0; left: 0; right: 0; background: #0F2138; display: flex; border-top: 1px solid #22395A; z-index: 5; }
+          .nav div { flex: 1; text-align: center; padding: 7px 0 9px; font-size: 11px; color: #8FA3BA; }
+          .nav div span { display: block; font-size: 19px; }
           .nav div.on { color: #fff; background: #17304F; }
-          .toast { position: fixed; bottom: 88px; left: 50%; transform: translateX(-50%); background: #000C; color: #fff; padding: 9px 16px; border-radius: 18px; font-size: 14px; display: none; max-width: 90%; text-align: center; z-index: 9; }
+          .toast { position: fixed; bottom: 88px; left: 50%; transform: translateX(-50%); background: #000C; color: #fff; padding: 9px 16px; border-radius: 18px; font-size: 14px; display: none; max-width: 90%; text-align: center; z-index: 20; }
           table { width: 100%; border-collapse: collapse; font-size: 13px; }
           td, th { padding: 6px 3px; border-bottom: 1px solid #22395A; text-align: center; }
           .big { font-size: 22px; font-weight: bold; }
           .adv { margin: 4px 0; font-size: 14px; }
-          .hide { display: none; }
+          .shf { background: #0F2138; border-radius: 10px; padding: 6px 8px; margin: 6px 0; }
+          .shf input { margin: 2px 0; }
+          .mg { display: flex; flex-wrap: wrap; gap: 6px; }
+          .mb { width: 31%; flex-grow: 1; background: #1F3A5C; border-radius: 12px; padding: 10px 2px; text-align: center; font-size: 13px; border: 1px solid transparent; }
+          .mb span { display: block; font-size: 26px; }
+          .mb.on { border-color: #9FC3FF; background: #2563EB; }
+          .mb.neg { background: #3A2430; } .mb.pos { background: #1E3A2C; }
+          .dots { color: #C98A1E; letter-spacing: 1px; }
+          .dh { background: #0F2138; color: #9FC3FF; font-weight: bold; text-align: right; padding: 7px 6px; }
+          .cal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 10; display: none; }
+          .cw { background: #13263F; margin: 50px 10px 0; border-radius: 16px; padding: 12px; box-shadow: 0 8px 30px #000; }
+          .ch { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+          .ch b { font-size: 17px; }
+          .ch .ar { background: #1F3A5C; border-radius: 10px; padding: 7px 13px; font-size: 16px; }
+          .ct { table-layout: fixed; }
+          .ct th { color: #8FA3BA; font-size: 12px; border: 0; padding: 4px 0; }
+          .ct th.fr { color: #FF8A8A; }
+          .ct td { border: 0; padding: 2px; }
+          .cd { height: 46px; border-radius: 11px; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 15px; background: #0F2138; border: 2px solid transparent; }
+          .cd.fr { color: #FF8A8A; }
+          .cd.t { border-color: #9FC3FF; }
+          .cd.s { background: #2563EB; color: #fff; }
+          .cd i { font-style: normal; font-size: 8px; height: 9px; line-height: 9px; }
+          .cd i b { display: inline-block; width: 5px; height: 5px; border-radius: 3px; margin: 0 1px; }
+          .cd .gr { font-size: 9px; color: #6F86A3; }
+          .cd.s .gr { color: #DDE8FF; }
           </style>
           </head>
           <body>
-          <div class="top"><b id="ttl"></b><span class="d" id="dt"></span></div>
+          <div class="top"><b id="ttl"></b><div class="dsel"><span class="ar" onclick="shiftSel(-1)">&#9654;</span><span class="db" id="dt" onclick="openCal()"></span><span class="ar" onclick="shiftSel(1)">&#9664;</span></div></div>
           <div id="upd"></div>
           <div id="pg"></div>
           <div class="nav" id="nav"></div>
+          <div class="cal" id="cal" onclick="if(event.target.id=='cal')closeCal()"></div>
           <div class="toast" id="toast"></div>
           <script>
           var BUILD = parseInt('__BUILD__', 10) || 0;
           var REPO = '__REPO__';
           var GR = { A: '\u0636\u0631\u0648\u0631\u06cc \u0648 \u0632\u0645\u0627\u0646\u200c\u062d\u0633\u0627\u0633', B: '\u0645\u0647\u0645 \u0628\u0631\u0627\u06cc \u0622\u06cc\u0646\u062f\u0647', C: '\u0646\u06af\u0647\u062f\u0627\u0631\u06cc \u0648 \u0631\u0648\u0632\u0645\u0631\u0647', D: '\u06a9\u0645\u200c\u0627\u0631\u0632\u0634 / \u0642\u0627\u0628\u0644 \u062a\u0639\u0648\u06cc\u0642' };
-          var OBS = ['\u0628\u0631\u0646\u0627\u0645\u0647 \u0633\u0646\u06af\u06cc\u0646 \u0628\u0648\u062f', '\u0632\u0645\u0627\u0646 \u0631\u0648 \u0627\u0634\u062a\u0628\u0627\u0647 \u062a\u062e\u0645\u06cc\u0646 \u0632\u062f\u0645', '\u06a9\u0627\u0631 \u0645\u0628\u0647\u0645 \u0628\u0648\u062f', '\u0627\u062a\u0641\u0627\u0642 \u063a\u06cc\u0631\u0645\u0646\u062a\u0638\u0631\u0647', '\u0627\u0646\u0631\u0698\u06cc \u06a9\u0627\u0641\u06cc \u0646\u0628\u0648\u062f', '\u06a9\u0627\u0631 \u0645\u063a\u0627\u0632\u0647 \u0628\u06cc\u0634\u062a\u0631 \u0634\u062f', '\u062d\u0648\u0627\u0633\u200c\u067e\u0631\u062a\u06cc / \u06af\u0648\u0634\u06cc', '\u0645\u0627\u0646\u0639\u06cc \u0646\u0628\u0648\u062f'];
+          var OBS = ['\u0628\u0631\u0646\u0627\u0645\u0647 \u0633\u0646\u06af\u06cc\u0646 \u0628\u0648\u062f', '\u0632\u0645\u0627\u0646 \u0631\u0648 \u0627\u0634\u062a\u0628\u0627\u0647 \u062a\u062e\u0645\u06cc\u0646 \u0632\u062f\u0645', '\u06a9\u0627\u0631 \u0645\u0628\u0647\u0645 \u0628\u0648\u062f', '\u0627\u062a\u0641\u0627\u0642 \u063a\u06cc\u0631\u0645\u0646\u062a\u0638\u0631\u0647', '\u0627\u0646\u0631\u0698\u06cc \u06a9\u0627\u0641\u06cc \u0646\u0628\u0648\u062f', '\u06a9\u0627\u0631 \u0645\u063a\u0627\u0632\u0647 \u0628\u06cc\u0634\u062a\u0631 \u0634\u062f', '\u062d\u0648\u0627\u0633\u200c\u067e\u0631\u062a\u06cc / \u06af\u0648\u0634\u06cc', '\u0627\u0633\u062a\u0631\u0633 \u06cc\u0627 \u0627\u0636\u0637\u0631\u0627\u0628', '\u0645\u0627\u0646\u0639\u06cc \u0646\u0628\u0648\u062f'];
           var EN = ['', '\u062e\u06cc\u0644\u06cc \u06a9\u0645', '\u06a9\u0645', '\u0645\u062a\u0648\u0633\u0637', '\u062e\u0648\u0628', '\u0639\u0627\u0644\u06cc'];
+          var INT = ['', '\u062e\u06cc\u0644\u06cc \u06a9\u0645', '\u06a9\u0645', '\u0645\u062a\u0648\u0633\u0637', '\u0632\u06cc\u0627\u062f', '\u062e\u06cc\u0644\u06cc \u0632\u06cc\u0627\u062f'];
           var MON = ['\u0641\u0631\u0648\u0631\u062f\u06cc\u0646', '\u0627\u0631\u062f\u06cc\u0628\u0647\u0634\u062a', '\u062e\u0631\u062f\u0627\u062f', '\u062a\u06cc\u0631', '\u0645\u0631\u062f\u0627\u062f', '\u0634\u0647\u0631\u06cc\u0648\u0631', '\u0645\u0647\u0631', '\u0622\u0628\u0627\u0646', '\u0622\u0630\u0631', '\u062f\u06cc', '\u0628\u0647\u0645\u0646', '\u0627\u0633\u0641\u0646\u062f'];
           var WD = ['\u06cc\u06a9\u0634\u0646\u0628\u0647', '\u062f\u0648\u0634\u0646\u0628\u0647', '\u0633\u0647\u200c\u0634\u0646\u0628\u0647', '\u0686\u0647\u0627\u0631\u0634\u0646\u0628\u0647', '\u067e\u0646\u062c\u0634\u0646\u0628\u0647', '\u062c\u0645\u0639\u0647', '\u0634\u0646\u0628\u0647'];
-          var TABS = [['today', '\u2600\ufe0f', '\u0627\u0645\u0631\u0648\u0632'], ['night', '\ud83c\udf19', '\u0628\u0627\u0632\u0628\u06cc\u0646\u06cc'], ['trend', '\ud83d\udcca', '\u0631\u0648\u0646\u062f'], ['ai', '\ud83e\udde0', '\u0647\u0648\u0634'], ['set', '\u2699\ufe0f', '\u062a\u0646\u0638\u06cc\u0645\u0627\u062a']];
+          var WDS = ['\u06cc', '\u062f', '\u0633', '\u0686', '\u067e', '\u062c', '\u0634'];
+          var WORD = [6, 0, 1, 2, 3, 4, 5];
+          var MOODS = [['anx', '\ud83d\ude30', '\u0627\u0636\u0637\u0631\u0627\u0628', -1], ['str', '\ud83d\ude23', '\u0627\u0633\u062a\u0631\u0633', -1], ['nrv', '\ud83d\ude24', '\u0641\u0634\u0627\u0631 \u0639\u0635\u0628\u06cc', -1], ['ang', '\ud83d\ude20', '\u062e\u0634\u0645', -1], ['sad', '\ud83d\ude14', '\u063a\u0645', -1], ['tir', '\ud83e\udd71', '\u062e\u0633\u062a\u06af\u06cc', -1], ['calm', '\ud83d\ude0c', '\u0622\u0631\u0627\u0645\u0634', 1], ['hap', '\ud83d\ude42', '\u062e\u0648\u0634\u062d\u0627\u0644\u06cc', 1], ['joy', '\ud83d\ude04', '\u0634\u0627\u062f\u06cc', 1]];
+          var TABS = [['today', '\u2600\ufe0f', '\u0631\u0648\u0632'], ['mood', '\ud83d\udcad', '\u0627\u062d\u0648\u0627\u0644'], ['night', '\ud83c\udf19', '\u0628\u0627\u0632\u0628\u06cc\u0646\u06cc'], ['trend', '\ud83d\udcca', '\u0631\u0648\u0646\u062f'], ['ai', '\ud83e\udde0', '\u0647\u0648\u0634'], ['set', '\u2699\ufe0f', '\u062a\u0646\u0638\u06cc\u0645\u0627\u062a']];
           var DEF_PROMPT = '\u062a\u0648 \u0633\u06cc\u0633\u062a\u0645 \u0645\u062f\u06cc\u0631\u06cc\u062a \u0632\u0646\u062f\u06af\u06cc \u0634\u062e\u0635\u06cc\u060c \u0645\u0631\u0628\u06cc \u0627\u062c\u0631\u0627\u06cc\u06cc \u0648 \u062f\u0633\u062a\u06cc\u0627\u0631 \u062a\u0635\u0645\u06cc\u0645\u200c\u06af\u06cc\u0631\u06cc \u0645\u0646 \u0647\u0633\u062a\u06cc. \u0647\u062f\u0641: \u062a\u0628\u062f\u06cc\u0644 \u0647\u062f\u0641 \u0628\u0647 \u0627\u0642\u062f\u0627\u0645 \u0648\u0627\u0642\u0639\u06cc \u0648 \u0633\u0646\u062c\u06cc\u062f\u0646 \u0646\u062a\u06cc\u062c\u0647\u060c \u0646\u0647 \u0627\u0646\u06af\u06cc\u0632\u0647 \u062f\u0627\u062f\u0646.\n' +
             '\u0642\u0648\u0627\u0639\u062f:\n' +
             '\u06f1. \u0631\u0641\u062a\u0627\u0631 \u062b\u0628\u062a\u200c\u0634\u062f\u0647 \u0627\u0632 \u0646\u06cc\u062a \u0627\u0639\u0644\u0627\u0645\u200c\u0634\u062f\u0647 \u0645\u0639\u062a\u0628\u0631\u062a\u0631\u0647\u060c \u0648\u0644\u06cc \u06cc\u0647 \u0631\u0648\u0632 \u0628\u062f \u0645\u0639\u0631\u0641 \u0634\u062e\u0635\u06cc\u062a \u0645\u0646 \u0646\u06cc\u0633\u062a.\n' +
             '\u06f2. \u0648\u0627\u0642\u0639\u06cc\u062a\u060c \u0628\u0631\u062f\u0627\u0634\u062a\u060c \u0641\u0631\u0636\u06cc\u0647 \u0648 \u062d\u062f\u0633 \u0631\u0648 \u062c\u062f\u0627 \u06a9\u0646. \u0647\u06cc\u0686 \u0648\u06cc\u0698\u06af\u06cc \u0634\u062e\u0635\u06cc\u062a\u06cc \u0631\u0648 \u0642\u0637\u0639\u06cc \u0627\u0639\u0644\u0627\u0645 \u0646\u06a9\u0646.\n' +
-            '\u06f3. \u0628\u0631\u0646\u0627\u0645\u0647 \u0631\u0648 \u0628\u0627 \u0627\u0646\u0631\u0698\u06cc \u0648 \u0632\u0645\u0627\u0646 \u0648\u0627\u0642\u0639\u06cc \u0628\u0686\u06cc\u0646\u060c \u0646\u0647 \u062a\u0635\u0648\u06cc\u0631 \u0627\u06cc\u062f\u0647\u200c\u0622\u0644. \u0633\u0627\u0639\u062a \u06a9\u0627\u0631 \u0645\u063a\u0627\u0632\u0647 \u062a\u0639\u0647\u062f \u0648\u0627\u0642\u0639\u06cc\u0647.\n' +
-            '\u06f4. \u06cc\u06a9 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc\u060c \u062d\u062f\u0627\u06a9\u062b\u0631 \u062f\u0648 \u0627\u0648\u0644\u0648\u06cc\u062a \u062b\u0627\u0646\u0648\u06cc\u0647\u060c \u0648 \u062c\u0627 \u0628\u0631\u0627\u06cc \u0627\u0633\u062a\u0631\u0627\u062d\u062a \u0648 \u0627\u062a\u0641\u0627\u0642\u0627\u062a \u067e\u06cc\u0634\u200c\u0628\u06cc\u0646\u06cc\u200c\u0646\u0634\u062f\u0647.\n' +
+            '\u06f3. \u0628\u0631\u0646\u0627\u0645\u0647 \u0631\u0648 \u0628\u0627 \u0627\u0646\u0631\u0698\u06cc \u0648 \u0632\u0645\u0627\u0646 \u0648\u0627\u0642\u0639\u06cc \u0628\u0686\u06cc\u0646\u060c \u0646\u0647 \u062a\u0635\u0648\u06cc\u0631 \u0627\u06cc\u062f\u0647\u200c\u0622\u0644. \u0646\u0648\u0628\u062a\u200c\u0647\u0627\u06cc \u06a9\u0627\u0631 \u0645\u063a\u0627\u0632\u0647 (\u0645\u0639\u0645\u0648\u0644\u0627\u064b \u062f\u0648 \u0646\u0648\u0628\u062a) \u062a\u0639\u0647\u062f \u0648\u0627\u0642\u0639\u06cc\u200c\u0627\u0646 \u0648 \u0637\u0648\u0644\u0634\u0648\u0646 \u0628\u0647 \u0627\u0646\u0631\u0698\u06cc\u0645 \u0628\u0633\u062a\u06af\u06cc \u062f\u0627\u0631\u0647.\n' +
+            '\u06f4. \u06cc\u06a9 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc\u060c \u062d\u062f\u0627\u06a9\u062b\u0631 \u062f\u0648 \u0627\u0648\u0644\u0648\u06cc\u062a \u062b\u0627\u0646\u0648\u06cc\u0647\u060c \u0648 \u062c\u0627 \u0628\u0631\u0627\u06cc \u0627\u0633\u062a\u0631\u0627\u062d\u062a \u0648 \u0627\u062a\u0641\u0627\u0642\u0627\u062a \u067e\u06cc\u0634\u200c\u0628\u06cc\u0646\u06cc\u200c\u0646\u0634\u062f\u0647. \u0631\u0648\u0632 \u0645\u0646 \u0645\u0645\u06a9\u0646\u0647 \u062a\u0627 \u0628\u0639\u062f \u0627\u0632 \u0646\u06cc\u0645\u0647\u200c\u0634\u0628 \u0627\u062f\u0627\u0645\u0647 \u062f\u0627\u0634\u062a\u0647 \u0628\u0627\u0634\u0647.\n' +
             '\u06f5. \u0647\u0631 \u06a9\u0627\u0631 \u0628\u0627\u06cc\u062f \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc \u0645\u0634\u062e\u0635\u060c \u0632\u0645\u0627\u0646 \u062a\u0642\u0631\u06cc\u0628\u06cc \u0648 \u0645\u0639\u06cc\u0627\u0631 \u067e\u0627\u06cc\u0627\u0646 \u062f\u0627\u0634\u062a\u0647 \u0628\u0627\u0634\u0647.\n' +
             '\u06f6. \u0631\u0648\u0632 \u06a9\u0645\u200c\u0627\u0646\u0631\u0698\u06cc: \u0641\u0642\u0637 \u0636\u0631\u0648\u0631\u06cc\u200c\u0647\u0627\u060c \u0628\u062f\u0648\u0646 \u0633\u0631\u0632\u0646\u0634. \u0631\u0648\u0632 \u067e\u0631\u0627\u0646\u0631\u0698\u06cc: \u0638\u0631\u0641\u06cc\u062a \u0631\u0648 \u06a9\u0627\u0645\u0644 \u067e\u0631 \u0646\u06a9\u0646.\n' +
             '\u06f7. \u0642\u0628\u0644 \u0627\u0632 \u062a\u062d\u0644\u06cc\u0644 \u0628\u06cc\u0634\u062a\u0631 \u0628\u067e\u0631\u0633 \u0622\u06cc\u0627 \u062c\u0648\u0627\u0628 \u062c\u062f\u06cc\u062f \u062a\u0635\u0645\u06cc\u0645 \u0631\u0648 \u0639\u0648\u0636 \u0645\u06cc\u200c\u06a9\u0646\u0647\u061b \u0627\u06af\u0647 \u0646\u0647\u060c \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc \u0631\u0648 \u0628\u06af\u0648. \u062f\u0631 \u0633\u0644\u0627\u0645\u062a\u060c \u0645\u0627\u0644\u06cc \u0648 \u062d\u0642\u0648\u0642\u060c \u062a\u062d\u0642\u06cc\u0642 \u0644\u0627\u0632\u0645 \u0631\u0648 \u0642\u0637\u0639 \u0646\u06a9\u0646.\n' +
             '\u06f8. \u0627\u06af\u0647 \u0631\u0648\u0632 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f\u060c \u0639\u0644\u062a \u0631\u0648 \u062f\u0631 \u0633\u06cc\u0633\u062a\u0645 \u067e\u06cc\u062f\u0627 \u06a9\u0646 (\u0628\u0631\u0646\u0627\u0645\u0647 \u0633\u0646\u06af\u06cc\u0646\u060c \u062a\u062e\u0645\u06cc\u0646 \u063a\u0644\u0637\u060c \u06a9\u0627\u0631 \u0645\u0628\u0647\u0645\u060c \u0627\u062a\u0641\u0627\u0642\u060c \u0627\u0646\u0631\u0698\u06cc)\u060c \u0646\u0647 \u0627\u06cc\u0646\u06a9\u0647 \u0641\u0634\u0627\u0631 \u0631\u0648 \u0628\u06cc\u0634\u062a\u0631 \u06a9\u0646\u06cc.\n' +
             '\u06f9. \u0628\u0627 \u062f\u0627\u062f\u0647 \u0646\u0627\u0642\u0635 \u0639\u062f\u062f \u0633\u0627\u062e\u062a\u06af\u06cc \u0646\u0633\u0627\u0632. \u0627\u06af\u0647 \u062f\u0627\u062f\u0647 \u06a9\u0645\u0647\u060c \u06cc\u0647 \u0622\u0632\u0645\u0627\u06cc\u0634 \u06a9\u0648\u0686\u06cc\u06a9 \u067e\u06cc\u0634\u0646\u0647\u0627\u062f \u0628\u062f\u0647.\n' +
-            '\u06f1\u06f0. \u0645\u0633\u062a\u0642\u06cc\u0645\u060c \u062f\u0642\u06cc\u0642\u060c \u0628\u062f\u0648\u0646 \u062a\u0639\u0631\u06cc\u0641 \u0648 \u0646\u0635\u06cc\u062d\u062a \u06a9\u0644\u06cc\u0634\u0647\u200c\u0627\u06cc. \u062f\u0631 \u067e\u0632\u0634\u06a9\u06cc\u060c \u0645\u0627\u0644\u06cc \u0648 \u062d\u0642\u0648\u0642 \u062a\u0634\u062e\u06cc\u0635 \u0642\u0637\u0639\u06cc \u06cc\u0627 \u062a\u0636\u0645\u06cc\u0646 \u0646\u062f\u0647.\n' +
+            '\u06f1\u06f0. \u062b\u0628\u062a\u200c\u0647\u0627\u06cc \u0627\u062d\u0648\u0627\u0644 (\u0627\u0636\u0637\u0631\u0627\u0628\u060c \u0627\u0633\u062a\u0631\u0633\u060c \u0641\u0634\u0627\u0631 \u0639\u0635\u0628\u06cc\u060c \u0634\u0627\u062f\u06cc \u0648...) \u062f\u0627\u062f\u0647\u200c\u0627\u0646\u060c \u0646\u0647 \u062a\u0634\u062e\u06cc\u0635. \u0627\u0648\u0646\u200c\u0647\u0627 \u0631\u0648 \u0628\u0627 \u0633\u0627\u0639\u062a\u060c \u0646\u0648\u0628\u062a \u0645\u063a\u0627\u0632\u0647\u060c \u062e\u0648\u0627\u0628 \u0648 \u06a9\u0627\u0631\u0647\u0627 \u0645\u0642\u0627\u06cc\u0633\u0647 \u06a9\u0646 \u0648 \u0631\u0627\u0647\u200c\u062d\u0644 \u06a9\u0648\u0686\u06cc\u06a9 \u0648 \u0642\u0627\u0628\u0644\u200c\u0622\u0632\u0645\u0627\u06cc\u0634 \u0628\u062f\u0647. \u0627\u06af\u0647 \u0646\u0634\u0627\u0646\u0647 \u062e\u0637\u0631 \u062c\u062f\u06cc \u062f\u06cc\u062f\u06cc\u060c \u06a9\u0645\u06a9 \u0645\u062a\u062e\u0635\u0635 \u0631\u0648 \u067e\u06cc\u0634\u0646\u0647\u0627\u062f \u06a9\u0646.\n' +
+            '\u06f1\u06f1. \u0645\u0633\u062a\u0642\u06cc\u0645\u060c \u062f\u0642\u06cc\u0642\u060c \u0628\u062f\u0648\u0646 \u062a\u0639\u0631\u06cc\u0641 \u0648 \u0646\u0635\u06cc\u062d\u062a \u06a9\u0644\u06cc\u0634\u0647\u200c\u0627\u06cc. \u062f\u0631 \u067e\u0632\u0634\u06a9\u06cc\u060c \u0645\u0627\u0644\u06cc \u0648 \u062d\u0642\u0648\u0642 \u062a\u0634\u062e\u06cc\u0635 \u0642\u0637\u0639\u06cc \u06cc\u0627 \u062a\u0636\u0645\u06cc\u0646 \u0646\u062f\u0647.\n' +
             '\u0642\u0627\u0644\u0628 \u062c\u0648\u0627\u0628 \u0631\u0648\u0632\u0627\u0646\u0647: \u0648\u0636\u0639\u06cc\u062a \u0641\u0639\u0644\u06cc\u060c \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc\u060c \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc\u060c \u0628\u0631\u0646\u0627\u0645\u0647 \u0648\u0627\u0642\u0639\u200c\u0628\u06cc\u0646\u0627\u0646\u0647\u060c \u062e\u0637\u0631 \u0627\u062d\u062a\u0645\u0627\u0644\u06cc\u060c \u0645\u0639\u06cc\u0627\u0631 \u067e\u0627\u06cc\u0627\u0646 \u0631\u0648\u0632. \u0627\u06af\u0647 \u0645\u0633\u0626\u0644\u0647 \u0633\u0627\u062f\u0647\u200c\u0633\u062a\u060c \u06a9\u0648\u062a\u0627\u0647\u0634 \u06a9\u0646.';
           var MODES = {
-            morning: ['\u2600\ufe0f \u0628\u0631\u0646\u0627\u0645\u0647 \u0635\u0628\u062d', '\u062d\u0627\u0644\u062a: \u0634\u0631\u0648\u0639 \u0631\u0648\u0632. \u0628\u0627 \u062f\u0627\u062f\u0647\u200c\u0647\u0627\u06cc \u0632\u06cc\u0631 \u0628\u0631\u0646\u0627\u0645\u0647 \u0627\u0645\u0631\u0648\u0632 \u0631\u0648 \u0628\u0686\u06cc\u0646. \u0641\u0642\u0637 \u0627\u06af\u0647 \u0627\u0637\u0644\u0627\u0639\u0627\u062a\u06cc \u0628\u0631\u0627\u06cc \u062a\u0635\u0645\u06cc\u0645 \u0627\u0645\u0631\u0648\u0632 \u0636\u0631\u0648\u0631\u06cc\u0647\u060c \u062d\u062f\u0627\u06a9\u062b\u0631 \u06f2 \u0633\u0624\u0627\u0644 \u0628\u067e\u0631\u0633.'],
+            morning: ['\u2600\ufe0f \u0628\u0631\u0646\u0627\u0645\u0647 \u0631\u0648\u0632', '\u062d\u0627\u0644\u062a: \u0634\u0631\u0648\u0639 \u0631\u0648\u0632. \u0628\u0627 \u062f\u0627\u062f\u0647\u200c\u0647\u0627\u06cc \u0632\u06cc\u0631 \u0628\u0631\u0646\u0627\u0645\u0647 \u0627\u06cc\u0646 \u0631\u0648\u0632 \u0631\u0648 \u0628\u0686\u06cc\u0646. \u0641\u0642\u0637 \u0627\u06af\u0647 \u0627\u0637\u0644\u0627\u0639\u0627\u062a\u06cc \u0628\u0631\u0627\u06cc \u062a\u0635\u0645\u06cc\u0645 \u0636\u0631\u0648\u0631\u06cc\u0647\u060c \u062d\u062f\u0627\u06a9\u062b\u0631 \u06f2 \u0633\u0624\u0627\u0644 \u0628\u067e\u0631\u0633.'],
             replan: ['\ud83d\udd04 \u062a\u0646\u0638\u06cc\u0645 \u0645\u062c\u062f\u062f', '\u062d\u0627\u0644\u062a: \u062a\u0646\u0638\u06cc\u0645 \u0645\u062c\u062f\u062f. \u0634\u0631\u0627\u06cc\u0637 \u0648\u0633\u0637 \u0631\u0648\u0632 \u0639\u0648\u0636 \u0634\u062f\u0647. \u0628\u0631\u0646\u0627\u0645\u0647 \u0631\u0648 \u0628\u0627 \u0638\u0631\u0641\u06cc\u062a \u0628\u0627\u0642\u06cc\u200c\u0645\u0648\u0646\u062f\u0647 \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0648\u0644\u0648\u06cc\u062a\u200c\u0628\u0646\u062f\u06cc \u06a9\u0646 \u0648 \u0627\u062c\u0631\u0627\u06cc \u0628\u0631\u0646\u0627\u0645\u0647 \u0634\u06a9\u0633\u062a\u200c\u062e\u0648\u0631\u062f\u0647 \u0631\u0648 \u0628\u0647 \u0647\u0631 \u0642\u06cc\u0645\u062a\u06cc \u0646\u062e\u0648\u0627\u0647.'],
             night: ['\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0634\u0628', '\u062d\u0627\u0644\u062a: \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u067e\u0627\u06cc\u0627\u0646 \u0631\u0648\u0632. \u0639\u0645\u0644\u06a9\u0631\u062f \u0633\u06cc\u0633\u062a\u0645 \u0631\u0648 \u0628\u0631\u0631\u0633\u06cc \u06a9\u0646\u060c \u0646\u0647 \u0634\u062e\u0635\u06cc\u062a \u0645\u0646. \u0628\u06af\u0648 \u06a9\u062f\u0648\u0645 \u0641\u0631\u0636\u06cc\u0647 \u062a\u0623\u06cc\u06cc\u062f \u06cc\u0627 \u0631\u062f \u0634\u062f \u0648 \u06cc\u06a9 \u062a\u063a\u06cc\u06cc\u0631 \u06a9\u0648\u0686\u06cc\u06a9 \u0628\u0631\u0627\u06cc \u0641\u0631\u062f\u0627 \u067e\u06cc\u0634\u0646\u0647\u0627\u062f \u0628\u062f\u0647.'],
-            week: ['\ud83d\udcc5 \u06af\u0632\u0627\u0631\u0634 \u0647\u0641\u062a\u06af\u06cc', '\u062d\u0627\u0644\u062a: \u06af\u0632\u0627\u0631\u0634 \u0647\u0641\u062a\u06af\u06cc. \u0645\u0647\u0645\u200c\u062a\u0631\u06cc\u0646 \u067e\u06cc\u0634\u0631\u0641\u062a\u200c\u0647\u0627\u060c \u062a\u0639\u0647\u062f\u0627\u062a \u0627\u0646\u062c\u0627\u0645\u200c\u0646\u0634\u062f\u0647 \u0648 \u0639\u0644\u062a \u0645\u062d\u062a\u0645\u0644\u060c \u0627\u0644\u06af\u0648\u0647\u0627\u06cc \u062a\u06a9\u0631\u0627\u0631\u06cc\u060c \u0627\u062a\u0644\u0627\u0641 \u0642\u0627\u0628\u0644\u200c\u067e\u06cc\u0634\u06af\u06cc\u0631\u06cc\u060c \u0648 \u06f1 \u062a\u0627 \u06f3 \u062a\u063a\u06cc\u06cc\u0631 \u0628\u0631\u0627\u06cc \u0647\u0641\u062a\u0647 \u0628\u0639\u062f. \u0647\u0631 \u067e\u06cc\u0634\u0646\u0647\u0627\u062f \u0628\u0627\u06cc\u062f \u0628\u0647 \u062f\u0627\u062f\u0647\u200c\u0647\u0627\u06cc \u0632\u06cc\u0631 \u0648\u0635\u0644 \u0628\u0627\u0634\u0647\u061b \u0627\u06af\u0647 \u062f\u0627\u062f\u0647 \u0628\u0631\u0627\u06cc \u06cc\u0647 \u0627\u0644\u06af\u0648 \u06a9\u0627\u0641\u06cc \u0646\u06cc\u0633\u062a\u060c \u0628\u0647\u200c\u062c\u0627\u06cc \u0646\u062a\u06cc\u062c\u0647\u200c\u06af\u06cc\u0631\u06cc \u06cc\u0647 \u0622\u0632\u0645\u0627\u06cc\u0634 \u0647\u0641\u062a\u06af\u06cc \u0637\u0631\u0627\u062d\u06cc \u06a9\u0646.']
+            week: ['\ud83d\udcc5 \u06af\u0632\u0627\u0631\u0634 \u0647\u0641\u062a\u06af\u06cc', '\u062d\u0627\u0644\u062a: \u06af\u0632\u0627\u0631\u0634 \u0647\u0641\u062a\u06af\u06cc. \u0645\u0647\u0645\u200c\u062a\u0631\u06cc\u0646 \u067e\u06cc\u0634\u0631\u0641\u062a\u200c\u0647\u0627\u060c \u062a\u0639\u0647\u062f\u0627\u062a \u0627\u0646\u062c\u0627\u0645\u200c\u0646\u0634\u062f\u0647 \u0648 \u0639\u0644\u062a \u0645\u062d\u062a\u0645\u0644\u060c \u0627\u0644\u06af\u0648\u0647\u0627\u06cc \u062a\u06a9\u0631\u0627\u0631\u06cc\u060c \u0627\u062a\u0644\u0627\u0641 \u0642\u0627\u0628\u0644\u200c\u067e\u06cc\u0634\u06af\u06cc\u0631\u06cc\u060c \u0648 \u06f1 \u062a\u0627 \u06f3 \u062a\u063a\u06cc\u06cc\u0631 \u0628\u0631\u0627\u06cc \u0647\u0641\u062a\u0647 \u0628\u0639\u062f. \u0647\u0631 \u067e\u06cc\u0634\u0646\u0647\u0627\u062f \u0628\u0627\u06cc\u062f \u0628\u0647 \u062f\u0627\u062f\u0647\u200c\u0647\u0627\u06cc \u0632\u06cc\u0631 \u0648\u0635\u0644 \u0628\u0627\u0634\u0647\u061b \u0627\u06af\u0647 \u062f\u0627\u062f\u0647 \u0628\u0631\u0627\u06cc \u06cc\u0647 \u0627\u0644\u06af\u0648 \u06a9\u0627\u0641\u06cc \u0646\u06cc\u0633\u062a\u060c \u0628\u0647\u200c\u062c\u0627\u06cc \u0646\u062a\u06cc\u062c\u0647\u200c\u06af\u06cc\u0631\u06cc \u06cc\u0647 \u0622\u0632\u0645\u0627\u06cc\u0634 \u0647\u0641\u062a\u06af\u06cc \u0637\u0631\u0627\u062d\u06cc \u06a9\u0646.'],
+            mood: ['\ud83d\udcad \u062a\u062d\u0644\u06cc\u0644 \u0627\u062d\u0648\u0627\u0644 \u0647\u0641\u062a\u0647', '\u062d\u0627\u0644\u062a: \u062a\u062d\u0644\u06cc\u0644 \u0627\u062d\u0648\u0627\u0644. \u062b\u0628\u062a\u200c\u0647\u0627\u06cc \u0627\u062d\u0633\u0627\u0633\u06cc \u06f7 \u0631\u0648\u0632 \u0627\u062e\u06cc\u0631 \u0631\u0648 \u0628\u0627 \u0633\u0627\u0639\u062a\u060c \u0646\u0648\u0628\u062a\u200c\u0647\u0627\u06cc \u0645\u063a\u0627\u0632\u0647\u060c \u062e\u0648\u0627\u0628\u060c \u0627\u0646\u0631\u0698\u06cc \u0648 \u06a9\u0627\u0631\u0647\u0627 \u0645\u0642\u0627\u06cc\u0633\u0647 \u06a9\u0646. \u0627\u0644\u06af\u0648\u0647\u0627\u06cc \u0645\u062d\u062a\u0645\u0644 (\u0646\u0647 \u0642\u0637\u0639\u06cc) \u0648 \u0645\u062d\u0631\u06a9\u200c\u0647\u0627\u06cc \u0627\u062d\u062a\u0645\u0627\u0644\u06cc \u0631\u0648 \u0628\u06af\u0648\u060c \u0648 \u0628\u0631\u0627\u06cc \u0647\u0631 \u0645\u0634\u06a9\u0644 \u062a\u06a9\u0631\u0627\u0631\u06cc \u06cc\u06a9 \u0631\u0627\u0647\u200c\u062d\u0644 \u06a9\u0648\u0686\u06cc\u06a9 \u0648 \u0642\u0627\u0628\u0644\u200c\u0622\u0632\u0645\u0627\u06cc\u0634 \u0628\u0631\u0627\u06cc \u0647\u0641\u062a\u0647 \u0628\u0639\u062f \u067e\u06cc\u0634\u0646\u0647\u0627\u062f \u0628\u062f\u0647.']
           };
 
           /* ---------- storage ---------- */
@@ -423,11 +570,21 @@ jobs:
             try { Android.save(k, s); } catch (e) { try { localStorage.setItem(k, s); } catch (e2) {} }
           }
           var S = ld('life1', null);
-          if (!S || !S.days) S = { v: 1, days: {} };
-          if (!S.set) S.set = {};
-          function setDef(k, v) { if (S.set[k] === undefined) S.set[k] = v; }
-          setDef('mt', '08:00'); setDef('nt', '22:30'); setDef('rem', true); setDef('ds', 4); setDef('sp', '');
-          function save() { sv('life1', S); }
+          if (!S || !S.days) S = { v: 2, days: {} };
+          function fixS() {
+            if (!S.set) S.set = {};
+            if (!S.md) S.md = [];
+            if (!S.alm) S.alm = {};
+            if (!S.rt) S.rt = [
+              { id: 'r1', n: '\ud83e\udea5 \u0645\u0633\u0648\u0627\u06a9', tms: ['08:00', '23:30'], m: 3, al: false, dw: [] },
+              { id: 'r2', n: '\ud83c\udf7d \u063a\u0630\u0627', tms: ['09:00', '14:30', '21:30'], m: 20, al: false, dw: [] }
+            ];
+            var d = { mt: '08:00', nt: '23:00', rem: true, ds: 4, sp: '', wk: '08:00', bt: '02:00', lb: 0 };
+            for (var k in d) if (S.set[k] === undefined) S.set[k] = d[k];
+          }
+          fixS();
+          var RTO = null;
+          function save() { sv('life1', S); clearTimeout(RTO); RTO = setTimeout(remind, 700); }
 
           /* ---------- helpers ---------- */
           function $(id) { return document.getElementById(id); }
@@ -438,6 +595,7 @@ jobs:
           }
           function num(s) { var n = parseFloat(toEn(s)); return isNaN(n) ? 0 : n; }
           function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+          function trim(s) { return String(s == null ? '' : s).replace(/^\s+|\s+$/g, ''); }
           function r1(x) { return Math.round(x * 10) / 10; }
           function pad(n) { return n < 10 ? '0' + n : '' + n; }
           function toast(t) { var el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.h); toast.h = setTimeout(function () { el.style.display = 'none'; }, 2600); }
@@ -457,50 +615,99 @@ jobs:
             if (days < 186) { jm = 1 + Math.floor(days / 31); jd = 1 + days % 31; } else { jm = 7 + Math.floor((days - 186) / 30); jd = 1 + (days - 186) % 30; }
             return [jy, jm, jd];
           }
-          function jStr(k, withWd) {
-            var d = kDate(k), j = g2j(d.getFullYear(), d.getMonth() + 1, d.getDate());
-            return (withWd ? WD[d.getDay()] + ' ' : '') + fa(j[2]) + ' ' + MON[j[1] - 1] + (withWd ? ' ' + fa(j[0]) : '');
+          function j2g(jy, jm, jd) {
+            jy += 1595;
+            var days = -355668 + 365 * jy + Math.floor(jy / 33) * 8 + Math.floor(((jy % 33) + 3) / 4) + jd + (jm < 7 ? (jm - 1) * 31 : (jm - 7) * 30 + 186);
+            var gy = 400 * Math.floor(days / 146097); days %= 146097;
+            if (days > 36524) { days--; gy += 100 * Math.floor(days / 36524); days %= 36524; if (days >= 365) days++; }
+            gy += 4 * Math.floor(days / 1461); days %= 1461;
+            if (days > 365) { gy += Math.floor((days - 1) / 365); days = (days - 1) % 365; }
+            var gd = days + 1, ml = [31, ((gy % 4 === 0 && gy % 100 !== 0) || gy % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], gm = 0;
+            while (gm < 12 && gd > ml[gm]) { gd -= ml[gm]; gm++; }
+            return [gy, gm + 1, gd];
           }
-          function newDay() { return { e: 0, sl: '', h: '', c: '', tasks: [], rv: null, ai: '', rp: [] }; }
-          function day(k) { if (!S.days[k]) S.days[k] = newDay(); return S.days[k]; }
-          function peek(k) { return S.days[k] || null; }
+          function jml(y, m) {
+            if (m <= 6) return 31;
+            if (m <= 11) return 30;
+            var a = j2g(y, 12, 1), b = j2g(y + 1, 1, 1);
+            return Math.round((new Date(b[0], b[1] - 1, b[2], 12) - new Date(a[0], a[1] - 1, a[2], 12)) / 86400000);
+          }
+          function jOf(k) { var d = kDate(k); return g2j(d.getFullYear(), d.getMonth() + 1, d.getDate()); }
+          function jStr(k, withWd) {
+            var j = jOf(k);
+            return (withWd ? WD[kDate(k).getDay()] + ' ' : '') + fa(j[2]) + ' ' + MON[j[1] - 1] + (withWd ? ' ' + fa(j[0]) : '');
+          }
+          function hm2m(hm) { var p = String(hm || '').split(':'); if (p.length < 2) return -1; var h = parseInt(p[0], 10), m = parseInt(p[1], 10); if (isNaN(h) || isNaN(m)) return -1; return h * 60 + m; }
+          function tmin(hm) { var m = hm2m(hm); if (m < 0) return -1; if (m < (S.set.ds || 0) * 60) m += 1440; return m; }
+          function dur(s, e) { var a = tmin(s), b = tmin(e); if (a < 0 || b < 0) return 0; if (b <= a) b += 1440; return b - a; }
+          function fmtM(m) { m = Math.round(m); var h = Math.floor(m / 60), mm = m % 60; return h ? fa(h) + ' \u0633\u0627\u0639\u062a' + (mm ? ' \u0648 ' + fa(mm) + ' \u062f\u0642\u06cc\u0642\u0647' : '') : fa(mm) + ' \u062f\u0642\u06cc\u0642\u0647'; }
+          function tsOf(k, hm) {
+            var m = hm2m(hm); if (m < 0) return 0;
+            var d = kDate(k); if (m < (S.set.ds || 0) * 60) d.setDate(d.getDate() + 1);
+            d.setHours(Math.floor(m / 60), m % 60, 0, 0); return d.getTime();
+          }
+          function hmOf(ts) { var d = new Date(ts); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+          function newDay() { return { e: 0, sl: '', h: '', c: '', wk: '', bt: '', sh: [], rt: {}, tasks: [], rv: null, ai: '', rp: [] }; }
+          function day(k) { var D = S.days[k]; if (!D) D = S.days[k] = newDay(); if (!D.sh) D.sh = []; if (!D.rt) D.rt = {}; if (!D.rp) D.rp = []; return D; }
+          function peek(k) { var D = S.days[k] || null; if (D) { if (!D.sh) D.sh = []; if (!D.rt) D.rt = {}; if (!D.rp) D.rp = []; } return D; }
           function findT(D, id) { for (var i = 0; i < D.tasks.length; i++) if (D.tasks[i].id == id) return D.tasks[i]; return null; }
+          function moodOf(id) { for (var i = 0; i < MOODS.length; i++) if (MOODS[i][0] == id) return MOODS[i]; return ['?', '\u2754', '?', 0]; }
+          function mdDay(k) { return S.md.filter(function (m) { return dk(m.t) == k; }); }
 
-          /* ---------- planning logic (no DOM) ---------- */
+          /* ---------- planning logic ---------- */
+          function rtFor(k) {
+            var wd = kDate(k).getDay(), out = [];
+            S.rt.forEach(function (r) {
+              if (r.dw && r.dw.length && r.dw.indexOf(wd) < 0) return;
+              (r.tms || []).forEach(function (tm, i) { if (tm) out.push({ r: r, i: i, tm: tm, key: r.id + '_' + i }); });
+            });
+            out.sort(function (a, b) { return tmin(a.tm) - tmin(b.tm); });
+            return out;
+          }
+          function shopM(D) { var s = 0; (D.sh || []).forEach(function (x) { s += dur(x.s, x.e); }); return s; }
+          function autoFree(D, k) {
+            var w = dur(D.wk || S.set.wk, D.bt || S.set.bt), shop = shopM(D), rtm = 0;
+            rtFor(k).forEach(function (x) { rtm += num(x.r.m); });
+            return { win: w, shop: shop, rt: rtm, free: Math.max(0, w - shop - rtm) };
+          }
           function limitPct(e) { return e && e <= 2 ? 0.5 : e == 3 ? 0.7 : 0.8; }
-          function cap(D) {
-            var avail = Math.round(num(D.h) * 60), plan = 0, left = 0, done = 0;
+          function cap(D, k) {
+            var af = autoFree(D, k), avail = num(D.h) ? Math.round(num(D.h) * 60) : af.free, plan = 0, left = 0, done = 0;
             for (var i = 0; i < D.tasks.length; i++) { var t = D.tasks[i], m = num(t.m); plan += m; if (t.d) done += m; else left += m; }
             var lim = Math.round(avail * limitPct(D.e));
-            return { avail: avail, plan: plan, left: left, done: done, lim: lim, over: avail > 0 ? left - lim : 0 };
+            return { avail: avail, man: !!num(D.h), af: af, plan: plan, left: left, done: done, lim: lim, over: avail > 0 ? left - lim : 0 };
           }
           var GORD = { D: 0, C: 1, B: 2, A: 3 };
-          function trimPlan(D) {
-            /* which open tasks should move to tomorrow so remaining load fits the limit. Never A, never main. */
-            var c = cap(D), need = c.over, out = [];
+          function trimPlan(D, k) {
+            var c = cap(D, k), need = c.over, out = [];
             if (!(c.avail > 0) || need <= 0) return out;
             var cand = D.tasks.filter(function (t) { return !t.d && t.g != 'A' && t.r != 'main'; });
             cand.sort(function (a, b) { return (GORD[a.g] - GORD[b.g]) || ((a.r == 'sec' ? 1 : 0) - (b.r == 'sec' ? 1 : 0)) || (num(b.m) - num(a.m)); });
             for (var i = 0; i < cand.length && need > 0; i++) { out.push(cand[i]); need -= num(cand[i].m); }
             return out;
           }
-          function advice(D) {
-            var a = [], c = cap(D), main = D.tasks.filter(function (t) { return t.r == 'main'; });
+          function rtLate(k) {
+            if (k != dk()) return [];
+            var now = tmin(hmOf(Date.now())), D = peek(k) || newDay();
+            return rtFor(k).filter(function (x) { return !D.rt[x.key] && tmin(x.tm) + 30 < now; });
+          }
+          function advice(D, k) {
+            var a = [], c = cap(D, k), main = D.tasks.filter(function (t) { return t.r == 'main'; });
             var sec = D.tasks.filter(function (t) { return t.r == 'sec'; });
-            if (!D.e) a.push(['w', '\u0627\u0648\u0644 \u0627\u0646\u0631\u0698\u06cc \u0648 \u0632\u0645\u0627\u0646 \u0622\u0632\u0627\u062f \u0627\u0645\u0631\u0648\u0632 \u0631\u0648 \u062b\u0628\u062a \u06a9\u0646 \u062a\u0627 \u0628\u0631\u0646\u0627\u0645\u0647 \u0648\u0627\u0642\u0639\u06cc \u0628\u0634\u0647.']);
+            if (!D.e) a.push(['w', '\u0627\u0648\u0644 \u0627\u0646\u0631\u0698\u06cc \u0631\u0648 \u062b\u0628\u062a \u06a9\u0646 \u062a\u0627 \u0628\u0631\u0646\u0627\u0645\u0647 \u0648\u0627\u0642\u0639\u06cc \u0628\u0634\u0647.']);
             if (D.e && D.e <= 2) a.push(['l', '\u0631\u0648\u0632 \u06a9\u0645\u200c\u0627\u0646\u0631\u0698\u06cc: \u0641\u0642\u0637 \u06a9\u0627\u0631\u0647\u0627\u06cc A \u0648 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc. \u0628\u0642\u06cc\u0647 \u0631\u0648 \u0628\u062f\u0648\u0646 \u0639\u0630\u0627\u0628 \u0648\u062c\u062f\u0627\u0646 \u0628\u0628\u0631 \u0641\u0631\u062f\u0627.']);
+            if (c.af.shop >= 480 && D.e && D.e <= 3) a.push(['l', fmtM(c.af.shop) + ' \u0645\u063a\u0627\u0632\u0647 \u062f\u0627\u0631\u06cc. \u06a9\u0627\u0631 \u0641\u06a9\u0631\u06cc \u0633\u0646\u06af\u06cc\u0646 \u0646\u0630\u0627\u0631\u061b \u0641\u0642\u0637 A \u0648 \u0627\u0635\u0644\u06cc.']);
             if (D.e >= 4) a.push(['o', '\u0627\u0646\u0631\u0698\u06cc \u062e\u0648\u0628\u0647: \u06cc\u0647 \u06a9\u0627\u0631 B \u062c\u0644\u0648 \u0628\u0646\u062f\u0627\u0632\u060c \u0648\u0644\u06cc \u0638\u0631\u0641\u06cc\u062a \u0631\u0648 \u06a9\u0627\u0645\u0644 \u067e\u0631 \u0646\u06a9\u0646 \u06a9\u0647 \u0641\u0631\u062f\u0627 \u0647\u0645 \u0642\u0627\u0628\u0644\u200c\u0627\u062f\u0627\u0645\u0647 \u0628\u0627\u0634\u0647.']);
-            if (D.tasks.length && !main.length) a.push(['w', '\u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc \u0646\u062f\u0627\u0631\u06cc. \u06cc\u06a9\u06cc \u0631\u0648 \u0628\u0627 \u2b50 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646: \u0627\u06af\u0647 \u0627\u0645\u0631\u0648\u0632 \u0641\u0642\u0637 \u06cc\u0647 \u06a9\u0627\u0631 \u0627\u0646\u062c\u0627\u0645 \u0628\u0634\u0647\u060c \u06a9\u062f\u0648\u0645\u0647\u061f']);
-            if (sec.length > 2) a.push(['w', fa(sec.length) + ' \u0627\u0648\u0644\u0648\u06cc\u062a \u062b\u0627\u0646\u0648\u06cc\u0647 \u062f\u0627\u0631\u06cc. \u062d\u062f\u0627\u06a9\u062b\u0631 \u06f2 \u062a\u0627 \u0646\u06af\u0647 \u062f\u0627\u0631\u060c \u0628\u0642\u06cc\u0647 \u0639\u0627\u062f\u06cc \u0628\u0634\u0646.']);
+            if (D.tasks.length && !main.length) a.push(['w', '\u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc \u0646\u062f\u0627\u0631\u06cc. \u06cc\u06a9\u06cc \u0631\u0648 \u0628\u0627 \u2b50 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646: \u0627\u06af\u0647 \u0641\u0642\u0637 \u06cc\u0647 \u06a9\u0627\u0631 \u0627\u0646\u062c\u0627\u0645 \u0628\u0634\u0647\u060c \u06a9\u062f\u0648\u0645\u0647\u061f']);
+            if (sec.length > 2) a.push(['w', fa(sec.length) + ' \u0627\u0648\u0644\u0648\u06cc\u062a \u062b\u0627\u0646\u0648\u06cc\u0647 \u062f\u0627\u0631\u06cc. \u062d\u062f\u0627\u06a9\u062b\u0631 \u06f2 \u062a\u0627 \u0646\u06af\u0647 \u062f\u0627\u0631.']);
             if (c.over > 0) a.push(['w', fa(c.over) + ' \u062f\u0642\u06cc\u0642\u0647 \u0628\u06cc\u0634\u062a\u0631 \u0627\u0632 \u0638\u0631\u0641\u06cc\u062a \u0627\u0645\u0646 (' + fa(Math.round(limitPct(D.e) * 100)) + '\u066a \u0632\u0645\u0627\u0646 \u0622\u0632\u0627\u062f). \u06a9\u0627\u0631\u0647\u0627\u06cc D \u0648 \u0628\u0639\u062f C \u0631\u0648 \u0628\u0628\u0631 \u0641\u0631\u062f\u0627.', 'trim']);
             var noNa = D.tasks.filter(function (t) { return !t.d && (!t.na || !num(t.m)); }).length;
             if (noNa) a.push(['w', fa(noNa) + ' \u06a9\u0627\u0631 \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc \u06cc\u0627 \u0632\u0645\u0627\u0646 \u062a\u0642\u0631\u06cc\u0628\u06cc \u0646\u062f\u0627\u0631\u0647. \u06a9\u0627\u0631 \u0645\u0628\u0647\u0645 \u0645\u0639\u0645\u0648\u0644\u0627\u064b \u0627\u0646\u062c\u0627\u0645 \u0646\u0645\u06cc\u0634\u0647.']);
-            var dCnt = D.tasks.filter(function (t) { return !t.d && t.g == 'D'; }).length;
-            if (dCnt && D.e && D.e <= 3) a.push(['l', fa(dCnt) + ' \u06a9\u0627\u0631 D \u062f\u0627\u0631\u06cc. \u06a9\u0645\u200c\u0627\u0631\u0632\u0634\u200c\u0647\u0627 \u0631\u0648 \u062d\u0630\u0641 \u06a9\u0646 \u06cc\u0627 \u0628\u0630\u0627\u0631 \u0628\u0631\u0627\u06cc \u0631\u0648\u0632 \u067e\u0631\u0627\u0646\u0631\u0698\u06cc.']);
+            var late = rtLate(k);
+            if (late.length) a.push(['w', fa(late.length) + ' \u0645\u0648\u0631\u062f \u0627\u0632 \u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a \u06af\u0630\u0634\u062a\u0647 \u0648 \u062a\u06cc\u06a9 \u0646\u062e\u0648\u0631\u062f\u0647: ' + late.map(function (x) { return x.r.n; }).join('\u060c ')]);
             return a;
           }
           function carryList(k) {
-            /* open tasks of the most recent previous day (within 7 days), except D */
             for (var i = 1; i <= 7; i++) {
               var pk = addD(k, -i), P = peek(pk);
               if (P && P.tasks.length) return { k: pk, list: P.tasks.filter(function (t) { return !t.d && !t.mv && t.g != 'D'; }) };
@@ -509,25 +716,31 @@ jobs:
           }
           function moveTask(fromK, t, toK) {
             var T = day(toK);
-            var n = { id: uid(), t: t.t, g: t.g, m: t.m, na: t.na, end: t.end, r: t.r == 'main' ? 'sec' : t.r, d: false, f: fromK };
-            T.tasks.push(n); t.mv = toK;
-            var F = peek(fromK); if (F) F.tasks = F.tasks.filter(function (x) { return x.id != t.id || fromK != dk(); });
+            var n = { id: uid(), t: t.t, g: t.g, m: t.m, na: t.na, end: t.end, tm: t.tm || '', al: !!t.al, r: t.r == 'main' ? 'sec' : t.r, d: false, f: fromK };
+            T.tasks.push(n); t.mv = toK; t.al = false;
+            var F = peek(fromK); if (F && fromK == SEL) F.tasks = F.tasks.filter(function (x) { return x.id != t.id; });
             return n;
           }
           function stats(keys) {
-            var r = { n: 0, e: 0, en: 0, sl: 0, sn: 0, mainT: 0, mainD: 0, aT: 0, aD: 0, tT: 0, tD: 0, sc: 0, scn: 0, ob: {}, rv: 0, hiS: [], loS: [] };
+            var r = { n: 0, e: 0, en: 0, sl: 0, sn: 0, mainT: 0, mainD: 0, aT: 0, aD: 0, tT: 0, tD: 0, sc: 0, scn: 0, ob: {}, rv: 0, hiS: [], loS: [], rtT: 0, rtD: 0, rtMiss: {}, shop: 0, shn: 0, md: {}, mdn: 0, mdNegB: [0, 0, 0, 0] };
             keys.forEach(function (k) {
+              mdDay(k).forEach(function (m) {
+                var o = r.md[m.k] || (r.md[m.k] = { n: 0, i: 0 }); o.n++; o.i += m.i || 0; r.mdn++;
+                if (moodOf(m.k)[3] < 0) { var h = new Date(m.t).getHours(); r.mdNegB[h >= 5 && h < 12 ? 0 : h >= 12 && h < 17 ? 1 : h >= 17 && h < 21 ? 2 : 3]++; }
+              });
               var D = peek(k); if (!D) return;
-              var used = D.e || D.tasks.length || D.rv; if (!used) return;
+              var used = D.e || D.tasks.length || D.rv || D.sh.length; if (!used) return;
               r.n++;
               if (D.e) { r.e += D.e; r.en++; }
               var sl = num(D.sl); if (sl) { r.sl += sl; r.sn++; }
               if (sl && D.e) (sl >= 7 ? r.hiS : r.loS).push(D.e);
+              if (D.sh.length) { r.shop += shopM(D); r.shn++; }
               D.tasks.forEach(function (t) {
                 r.tT++; if (t.d) r.tD++;
                 if (t.r == 'main') { r.mainT++; if (t.d) r.mainD++; }
                 if (t.g == 'A') { r.aT++; if (t.d) r.aD++; }
               });
+              rtFor(k).forEach(function (x) { r.rtT++; if (D.rt[x.key]) r.rtD++; else r.rtMiss[x.r.n] = (r.rtMiss[x.r.n] || 0) + 1; });
               if (D.rv) { r.rv++; if (D.rv.sc) { r.sc += D.rv.sc; r.scn++; } (D.rv.ob || []).forEach(function (o) { r.ob[o] = (r.ob[o] || 0) + 1; }); }
             });
             return r;
@@ -537,23 +750,30 @@ jobs:
 
           /* ---------- text for AI ---------- */
           function tLine(t) {
-            return '- [' + (t.d ? '\u2713' : ' ') + '] (' + t.g + (t.r == 'main' ? '\u060c \u2b50 \u0627\u0635\u0644\u06cc' : t.r == 'sec' ? '\u060c \u062b\u0627\u0646\u0648\u06cc\u0647' : '') + (num(t.m) ? '\u060c ' + num(t.m) + ' \u062f\u0642\u06cc\u0642\u0647' : '') + ') ' + t.t +
+            return '- [' + (t.d ? '\u2713' : ' ') + '] (' + t.g + (t.r == 'main' ? '\u060c \u2b50 \u0627\u0635\u0644\u06cc' : t.r == 'sec' ? '\u060c \u062b\u0627\u0646\u0648\u06cc\u0647' : '') + (num(t.m) ? '\u060c ' + num(t.m) + ' \u062f\u0642\u06cc\u0642\u0647' : '') + (t.tm ? '\u060c \u0633\u0627\u0639\u062a ' + t.tm : '') + ') ' + t.t +
               (t.na ? ' | \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc: ' + t.na : '') + (t.end ? ' | \u0645\u0639\u06cc\u0627\u0631 \u067e\u0627\u06cc\u0627\u0646: ' + t.end : '') + (t.f ? ' | \u0645\u0646\u062a\u0642\u0644\u200c\u0634\u062f\u0647 \u0627\u0632 ' + jStr(t.f) : '');
           }
+          function mdLine(m) { var o = moodOf(m.k); return '- ' + hmOf(m.t) + ' ' + o[2] + ' (\u0634\u062f\u062a ' + (m.i || '?') + '/5)' + (m.n ? ': ' + m.n : ''); }
           function dayText(k, full) {
-            var D = peek(k); if (!D) return jStr(k, true) + ': \u0628\u062f\u0648\u0646 \u062f\u0627\u062f\u0647\n';
-            var c = cap(D), s = '### ' + jStr(k, true) + '\n';
-            s += '\u0627\u0646\u0631\u0698\u06cc: ' + (D.e ? D.e + '/5 (' + EN[D.e] + ')' : '\u062b\u0628\u062a \u0646\u0634\u062f\u0647') + ' | \u062e\u0648\u0627\u0628: ' + (num(D.sl) ? num(D.sl) + ' \u0633\u0627\u0639\u062a' : '\u062b\u0628\u062a \u0646\u0634\u062f\u0647') + ' | \u0632\u0645\u0627\u0646 \u0622\u0632\u0627\u062f: ' + (num(D.h) ? num(D.h) + ' \u0633\u0627\u0639\u062a' : '\u062b\u0628\u062a \u0646\u0634\u062f\u0647') + '\n';
-            if (D.c) s += '\u062a\u0639\u0647\u062f \u0642\u0637\u0639\u06cc \u0627\u0645\u0631\u0648\u0632: ' + D.c + '\n';
-            if (c.avail) s += '\u0628\u0627\u0631 \u0628\u0631\u0646\u0627\u0645\u0647: ' + c.plan + ' \u062f\u0642\u06cc\u0642\u0647 \u0627\u0632 ' + c.avail + ' \u062f\u0642\u06cc\u0642\u0647 (\u0633\u0642\u0641 \u0627\u0645\u0646 ' + c.lim + ')\n';
+            var D = peek(k), md = mdDay(k);
+            if (!D && !md.length) return '### ' + jStr(k, true) + ': \u0628\u062f\u0648\u0646 \u062f\u0627\u062f\u0647\n';
+            D = D || newDay();
+            var c = cap(D, k), s = '### ' + jStr(k, true) + '\n';
+            s += '\u0627\u0646\u0631\u0698\u06cc: ' + (D.e ? D.e + '/5 (' + EN[D.e] + ')' : '\u062b\u0628\u062a \u0646\u0634\u062f\u0647') + ' | \u062e\u0648\u0627\u0628 \u062f\u06cc\u0634\u0628: ' + (num(D.sl) ? num(D.sl) + ' \u0633\u0627\u0639\u062a' : '\u062b\u0628\u062a \u0646\u0634\u062f\u0647') + ' | \u0628\u06cc\u062f\u0627\u0631\u06cc ' + (D.wk || S.set.wk) + ' \u062a\u0627 \u062e\u0648\u0627\u0628 ' + (D.bt || S.set.bt) + '\n';
+            if (D.sh.length) s += '\u0645\u063a\u0627\u0632\u0647: ' + D.sh.map(function (x, i) { return '\u0646\u0648\u0628\u062a ' + (i + 1) + ' ' + x.s + ' \u062a\u0627 ' + x.e; }).join('\u060c ') + ' (\u062c\u0645\u0639 ' + Math.round(shopM(D) / 6) / 10 + ' \u0633\u0627\u0639\u062a)\n';
+            if (D.c) s += '\u062a\u0639\u0647\u062f \u0642\u0637\u0639\u06cc: ' + D.c + '\n';
+            if (c.avail) s += '\u0632\u0645\u0627\u0646 \u0622\u0632\u0627\u062f: ' + c.avail + ' \u062f\u0642\u06cc\u0642\u0647' + (c.man ? ' (\u062f\u0633\u062a\u06cc)' : ' (\u062e\u0648\u062f\u06a9\u0627\u0631)') + ' | \u0628\u0627\u0631 \u06a9\u0627\u0631\u0647\u0627: ' + c.plan + ' \u062f\u0642\u06cc\u0642\u0647 (\u0633\u0642\u0641 \u0627\u0645\u0646 ' + c.lim + ')\n';
+            var rts = rtFor(k);
+            if (rts.length) { var miss = rts.filter(function (x) { return !D.rt[x.key]; }); s += '\u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a: ' + (rts.length - miss.length) + ' \u0627\u0632 ' + rts.length + (miss.length ? ' (\u062c\u0627\u0627\u0641\u062a\u0627\u062f\u0647: ' + miss.map(function (x) { return x.r.n + ' ' + x.tm; }).join('\u060c ') + ')' : '') + '\n'; }
             if (D.tasks.length) { s += '\u06a9\u0627\u0631\u0647\u0627 (' + D.tasks.filter(function (t) { return t.d; }).length + ' \u0627\u0632 ' + D.tasks.length + ' \u0627\u0646\u062c\u0627\u0645 \u0634\u062f):\n'; D.tasks.forEach(function (t) { if (full || t.r || t.g == 'A' || t.d) s += tLine(t) + '\n'; }); }
-            (D.rp || []).forEach(function (p) { s += '\u062a\u0646\u0638\u06cc\u0645 \u0645\u062c\u062f\u062f (' + p.tm + '): \u0627\u0646\u0631\u0698\u06cc ' + (p.e || '?') + '/5\u060c ' + p.h + ' \u0633\u0627\u0639\u062a \u0645\u0648\u0646\u062f\u0647' + (p.n ? '\u060c ' + p.n : '') + '\n'; });
+            D.rp.forEach(function (p) { s += '\u062a\u0646\u0638\u06cc\u0645 \u0645\u062c\u062f\u062f (' + p.tm + '): \u0627\u0646\u0631\u0698\u06cc ' + (p.e || '?') + '/5\u060c ' + p.h + ' \u0633\u0627\u0639\u062a \u0645\u0648\u0646\u062f\u0647' + (p.n ? '\u060c ' + p.n : '') + '\n'; });
+            if (md.length) { s += '\u0627\u062d\u0648\u0627\u0644:\n'; md.forEach(function (m) { s += mdLine(m) + '\n'; }); }
             if (D.rv) {
               var v = D.rv;
               s += '\u0628\u0627\u0632\u0628\u06cc\u0646\u06cc: \u0627\u0645\u062a\u06cc\u0627\u0632 \u0631\u0648\u0632 ' + (v.sc || '?') + '/5' + ((v.ob || []).length ? ' | \u0645\u0648\u0627\u0646\u0639: ' + v.ob.join('\u060c ') : '') + '\n';
               if (v.res) s += '  \u0645\u0647\u0645\u200c\u062a\u0631\u06cc\u0646 \u0646\u062a\u06cc\u062c\u0647: ' + v.res + '\n';
               if (v.obt) s += '  \u062a\u0648\u0636\u06cc\u062d \u0645\u0627\u0646\u0639: ' + v.obt + '\n';
-              if (v.hyp) s += '  \u0641\u0631\u0636\u06cc\u0647 \u0627\u0645\u0631\u0648\u0632: ' + v.hyp + '\n';
+              if (v.hyp) s += '  \u0641\u0631\u0636\u06cc\u0647: ' + v.hyp + '\n';
               if (v.drop) s += '  \u062d\u0630\u0641 \u06cc\u0627 \u0633\u0627\u062f\u0647\u200c\u0633\u0627\u0632\u06cc: ' + v.drop + '\n';
               if (v.next) s += '  \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc: ' + v.next + '\n';
             }
@@ -564,277 +784,471 @@ jobs:
             s += '\u0631\u0648\u0632\u0647\u0627\u06cc \u062f\u0627\u0631\u0627\u06cc \u062f\u0627\u062f\u0647: ' + r.n + ' \u0627\u0632 \u06f7\n';
             if (r.en) s += '\u0645\u06cc\u0627\u0646\u06af\u06cc\u0646 \u0627\u0646\u0631\u0698\u06cc: ' + r1(r.e / r.en) + '/5\n';
             if (r.sn) s += '\u0645\u06cc\u0627\u0646\u06af\u06cc\u0646 \u062e\u0648\u0627\u0628: ' + r1(r.sl / r.sn) + ' \u0633\u0627\u0639\u062a\n';
+            if (r.shn) s += '\u0645\u06cc\u0627\u0646\u06af\u06cc\u0646 \u0645\u063a\u0627\u0632\u0647: ' + r1(r.shop / r.shn / 60) + ' \u0633\u0627\u0639\u062a \u062f\u0631 ' + r.shn + ' \u0631\u0648\u0632\n';
             if (r.mainT) s += '\u0627\u0646\u062c\u0627\u0645 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc: ' + r.mainD + ' \u0627\u0632 ' + r.mainT + '\n';
             if (r.aT) s += '\u0627\u0646\u062c\u0627\u0645 \u06a9\u0627\u0631\u0647\u0627\u06cc \u0636\u0631\u0648\u0631\u06cc (A): ' + r.aD + ' \u0627\u0632 ' + r.aT + '\n';
             if (r.tT) s += '\u06a9\u0644 \u06a9\u0627\u0631\u0647\u0627: ' + r.tD + ' \u0627\u0632 ' + r.tT + '\n';
+            if (r.rtT) { s += '\u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a: ' + r.rtD + ' \u0627\u0632 ' + r.rtT; var ms = Object.keys(r.rtMiss); if (ms.length) s += ' (\u0628\u06cc\u0634\u062a\u0631\u06cc\u0646 \u062c\u0627\u0627\u0641\u062a\u0627\u062f\u0647: ' + ms.sort(function (a, b) { return r.rtMiss[b] - r.rtMiss[a]; }).slice(0, 3).map(function (x) { return x + ' \u00d7' + r.rtMiss[x]; }).join('\u060c ') + ')'; s += '\n'; }
             var ob = Object.keys(r.ob); if (ob.length) s += '\u0645\u0648\u0627\u0646\u0639: ' + ob.map(function (o) { return o + ' \u00d7' + r.ob[o]; }).join('\u060c ') + '\n';
             if (r.hiS.length >= 2 && r.loS.length >= 2) s += '\u0627\u0646\u0631\u0698\u06cc \u0628\u0639\u062f \u0627\u0632 \u062e\u0648\u0627\u0628 \u06f7+ \u0633\u0627\u0639\u062a: ' + r1(avg(r.hiS)) + ' (' + r.hiS.length + ' \u0631\u0648\u0632) | \u06a9\u0645\u062a\u0631 \u0627\u0632 \u06f7: ' + r1(avg(r.loS)) + ' (' + r.loS.length + ' \u0631\u0648\u0632)\n';
+            var mk = Object.keys(r.md);
+            if (mk.length) {
+              s += '\u0627\u062d\u0648\u0627\u0644 (' + r.mdn + ' \u062b\u0628\u062a): ' + mk.map(function (x) { return moodOf(x)[2] + ' \u00d7' + r.md[x].n + ' (\u0645\u06cc\u0627\u0646\u06af\u06cc\u0646 \u0634\u062f\u062a ' + r1(r.md[x].i / r.md[x].n) + ')'; }).join('\u060c ') + '\n';
+              s += '\u0627\u062d\u0648\u0627\u0644 \u0645\u0646\u0641\u06cc \u0628\u0631 \u0627\u0633\u0627\u0633 \u0633\u0627\u0639\u062a: \u0635\u0628\u062d ' + r.mdNegB[0] + '\u060c \u0638\u0647\u0631 ' + r.mdNegB[1] + '\u060c \u0639\u0635\u0631 ' + r.mdNegB[2] + '\u060c \u0634\u0628 ' + r.mdNegB[3] + '\n';
+            }
             return s;
           }
           function buildPrompt(mode) {
-            var k = dk(), s = (S.set.sp || DEF_PROMPT) + '\n\n---\n' + MODES[mode][1] + '\n\n';
-            if (mode == 'week') { s += weekSummary() + '\n'; lastKeys(7).reverse().forEach(function (x) { if (peek(x)) s += dayText(x, false) + '\n'; }); }
-            else {
+            var k = SEL, s = (S.set.sp || DEF_PROMPT) + '\n\n---\n' + MODES[mode][1] + '\n\n';
+            if (mode == 'week' || mode == 'mood') {
+              s += weekSummary() + '\n';
+              lastKeys(7).reverse().forEach(function (x) { if (peek(x) || mdDay(x).length) s += dayText(x, mode == 'mood') + '\n'; });
+            } else {
               s += dayText(k, true) + '\n';
-              var y = peek(addD(k, -1)); if (y) s += '(\u062f\u06cc\u0631\u0648\u0632 \u0628\u0631\u0627\u06cc \u0645\u0642\u0627\u06cc\u0633\u0647)\n' + dayText(addD(k, -1), false) + '\n';
+              var y = addD(k, -1); if (peek(y)) s += '(\u0631\u0648\u0632 \u0642\u0628\u0644 \u0628\u0631\u0627\u06cc \u0645\u0642\u0627\u06cc\u0633\u0647)\n' + dayText(y, false) + '\n';
               if (mode != 'night') s += weekSummary();
             }
             return s;
           }
 
-          /* ---------- UI ---------- */
-          var TAB = 'today', EDIT = null, FORM = false, RP = false;
-          function go(t) { TAB = t; EDIT = null; FORM = false; RP = false; render(); window.scrollTo(0, 0); }
-          function appBack() { if (FORM || EDIT || RP) { FORM = false; EDIT = null; RP = false; render(); return true; } if (TAB != 'today') { go('today'); return true; } return false; }
-          function nav() {
-            $('nav').innerHTML = TABS.map(function (t) { return '<div class="' + (TAB == t[0] ? 'on' : '') + '" onclick="go(\'' + t[0] + '\')"><span>' + t[1] + '</span>' + t[2] + '</div>'; }).join('');
+          /* ---------- UI state ---------- */
+          var SEL = dk(), TAB = 'today', EDIT = null, FORM = false, RP = false, CAL = null, MF = null, MDALL = false, RE = null, RV = null;
+          function go(t) { TAB = t; EDIT = null; FORM = false; RP = false; MF = null; RE = null; render(); window.scrollTo(0, 0); }
+          function appBack() {
+            if (CAL) { closeCal(); return true; }
+            if (FORM || EDIT || RP || MF || RE) { FORM = false; EDIT = null; RP = false; MF = null; RE = null; render(); return true; }
+            if (TAB != 'today') { go('today'); return true; }
+            if (SEL != dk()) { setSel(dk()); return true; }
+            return false;
           }
+          function setSel(k) { SEL = k; RV = null; EDIT = null; FORM = false; RP = false; render(); }
+          function shiftSel(n) { setSel(addD(SEL, n)); }
+          function nav() { $('nav').innerHTML = TABS.map(function (t) { return '<div class="' + (TAB == t[0] ? 'on' : '') + '" onclick="go(\'' + t[0] + '\')"><span>' + t[1] + '</span>' + t[2] + '</div>'; }).join(''); }
           function chips(name, n, cur, fn) {
             var h = '<div class="chips">';
             for (var i = 1; i <= n; i++) h += '<span id="' + fn + i + '" class="chip' + (cur == i ? ' on' : '') + '" onclick="' + fn + '(' + i + ')">' + fa(i) + (name ? ' ' + name[i] : '') + '</span>';
             return h + '</div>';
           }
+          function hiChip(fn, n) { for (var i = 1; i <= 5; i++) { var el = $(fn + i); if (el) el.className = 'chip' + (i == n ? ' on' : ''); } }
           function render() {
             nav();
-            $('dt').textContent = jStr(dk(), true);
-            $('ttl').textContent = { today: '\u2600\ufe0f \u0627\u0645\u0631\u0648\u0632', night: '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0634\u0628', trend: '\ud83d\udcca \u0631\u0648\u0646\u062f', ai: '\ud83e\udde0 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc', set: '\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a' }[TAB];
-            var f = { today: rToday, night: rNight, trend: rTrend, ai: rAi, set: rSet }[TAB];
-            $('pg').innerHTML = f();
+            var j = jOf(SEL), t = SEL == dk();
+            $('dt').innerHTML = '\ud83d\udcc5 ' + (t ? '\u0627\u0645\u0631\u0648\u0632\u060c ' : '') + WD[kDate(SEL).getDay()] + ' ' + fa(j[2]) + ' ' + MON[j[1] - 1];
+            $('ttl').textContent = { today: '\u2600\ufe0f \u0631\u0648\u0632', mood: '\ud83d\udcad \u0627\u062d\u0648\u0627\u0644', night: '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc', trend: '\ud83d\udcca \u0631\u0648\u0646\u062f', ai: '\ud83e\udde0 \u0647\u0648\u0634', set: '\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a' }[TAB];
+            $('pg').innerHTML = { today: rToday, mood: rMood, night: rNight, trend: rTrend, ai: rAi, set: rSet }[TAB]();
           }
 
-          /* today */
-          function rToday() {
-            var k = dk(), D = day(k), c = cap(D), h = '';
-            if (!D.tasks.length) {
-              var cl = carryList(k);
-              if (cl.list.length) h += '<div class="box warn"><b>' + fa(cl.list.length) + ' \u06a9\u0627\u0631 \u0646\u0627\u062a\u0645\u0648\u0645 \u0627\u0632 ' + jStr(cl.k) + '</b><div class="mut">\u06a9\u0627\u0631\u0647\u0627\u06cc D \u0645\u0646\u062a\u0642\u0644 \u0646\u0645\u06cc\u0634\u0646. \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc \u0642\u0628\u0644\u06cc\u060c \u062b\u0627\u0646\u0648\u06cc\u0647 \u0645\u06cc\u0634\u0647 \u062a\u0627 \u0627\u0645\u0631\u0648\u0632 \u062e\u0648\u062f\u062a \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646\u06cc.</div><button class="btn s" onclick="carry()">\u2b05\ufe0f \u0627\u0646\u062a\u0642\u0627\u0644 \u0628\u0647 \u0627\u0645\u0631\u0648\u0632</button> <button class="btn g s" onclick="skipCarry()">\u0646\u0647\u060c \u0627\u0632 \u0635\u0641\u0631</button></div>';
+          /* ---------- calendar ---------- */
+          function openCal() { var j = jOf(SEL); CAL = { y: j[0], m: j[1] }; rCal(); }
+          function closeCal() { CAL = null; $('cal').style.display = 'none'; }
+          function calM(n) { CAL.m += n; if (CAL.m > 12) { CAL.m = 1; CAL.y++; } if (CAL.m < 1) { CAL.m = 12; CAL.y--; } rCal(); }
+          function calPick(k) { closeCal(); setSel(k); }
+          function rCal() {
+            var y = CAL.y, m = CAL.m, n = jml(y, m), g = j2g(y, m, 1), d = new Date(g[0], g[1] - 1, g[2], 12), off = (d.getDay() + 1) % 7, tk = dk();
+            var h = '<div class="cw"><div class="ch"><span class="ar" onclick="calM(-1)">&#9654;</span><b>' + MON[m - 1] + ' ' + fa(y) + '</b><span class="ar" onclick="calM(1)">&#9664;</span></div><table class="ct"><tr>';
+            WORD.forEach(function (w) { h += '<th' + (w == 5 ? ' class="fr"' : '') + '>' + WDS[w] + '</th>'; });
+            h += '</tr><tr>';
+            for (var i = 0; i < off; i++) h += '<td></td>';
+            for (var dd = 1; dd <= n; dd++) {
+              var k = keyOf(d), D = peek(k), md = mdDay(k).length, dots = '';
+              if (D && (D.tasks.length || D.e || D.sh.length)) dots += '<b style="background:#4C9AFF"></b>';
+              if (D && D.rv) dots += '<b style="background:#2EC27E"></b>';
+              if (md) dots += '<b style="background:#B48CFF"></b>';
+              var cls = 'cd' + (d.getDay() == 5 ? ' fr' : '') + (k == tk ? ' t' : '') + (k == SEL ? ' s' : '');
+              h += '<td><div class="' + cls + '" onclick="calPick(\'' + k + '\')">' + fa(dd) + '<span class="gr">' + d.getDate() + '</span><i>' + dots + '</i></div></td>';
+              if ((off + dd) % 7 == 0 && dd < n) h += '</tr><tr>';
+              d.setDate(d.getDate() + 1);
             }
-            h += '<div class="box"><h3>\u0648\u0636\u0639\u06cc\u062a \u0627\u0645\u0631\u0648\u0632</h3><label>\u0627\u0646\u0631\u0698\u06cc \u0627\u0644\u0627\u0646</label>' + chips(EN, 5, D.e, 'setE') +
-              '<div class="row"><div style="flex:1"><label>\u062e\u0648\u0627\u0628 \u062f\u06cc\u0634\u0628 (\u0633\u0627\u0639\u062a)</label><input inputmode="decimal" value="' + esc(D.sl) + '" onchange="setF(\'sl\',this.value)"></div>' +
-              '<div style="flex:1"><label>\u0632\u0645\u0627\u0646 \u0622\u0632\u0627\u062f \u0627\u0645\u0631\u0648\u0632 (\u0633\u0627\u0639\u062a\u060c \u0628\u062f\u0648\u0646 \u0645\u063a\u0627\u0632\u0647)</label><input inputmode="decimal" value="' + esc(D.h) + '" onchange="setF(\'h\',this.value)"></div></div>' +
-              '<label>\u062a\u0639\u0647\u062f \u0642\u0637\u0639\u06cc \u0627\u0645\u0631\u0648\u0632 (\u0645\u062b\u0644\u0627\u064b \u0645\u063a\u0627\u0632\u0647 \u06f9 \u062a\u0627 \u06f2\u06f1)</label><input value="' + esc(D.c) + '" onchange="setF(\'c\',this.value)"></div>';
-            return h + '<div id="dyn">' + rDyn() + '</div>';
+            h += '</tr></table><div class="mut sm" style="margin:6px 0"><b style="color:#4C9AFF">\u25cf</b> \u0628\u0631\u0646\u0627\u0645\u0647 \u00b7 <b style="color:#2EC27E">\u25cf</b> \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u00b7 <b style="color:#B48CFF">\u25cf</b> \u0627\u062d\u0648\u0627\u0644</div>' +
+              '<div class="row"><button class="btn s" onclick="calPick(\'' + tk + '\')">\u0627\u0645\u0631\u0648\u0632</button><button class="btn g s" onclick="closeCal()">\u0628\u0633\u062a\u0646</button></div></div>';
+            var el = $('cal'); el.innerHTML = h; el.style.display = 'block';
+          }
+
+          /* ---------- today ---------- */
+          function rToday() {
+            var k = SEL, D = day(k), isT = k == dk(), h = '';
+            if (!isT) h += '<div class="box ' + (k > dk() ? 'ok' : 'low') + '"><div class="row"><span>' + (k > dk() ? '\ud83d\uddd3 \u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc \u0628\u0631\u0627\u06cc ' : '\ud83d\udd70 \u062f\u0627\u0631\u06cc \u0631\u0648\u0632 \u06af\u0630\u0634\u062a\u0647 \u0631\u0648 \u0645\u06cc\u200c\u0628\u06cc\u0646\u06cc: ') + jStr(k, true) + '</span><button class="btn s" onclick="setSel(dk())">\u0628\u0631\u0648 \u0627\u0645\u0631\u0648\u0632</button></div></div>';
+            if (isT && Object.keys(S.days).length >= 3 && Date.now() - (S.set.lb || 0) > 7 * 86400000) h += '<div class="box warn"><div class="row"><span>\ud83d\udcbe \u0628\u06cc\u0634\u062a\u0631 \u0627\u0632 \u06cc\u0647 \u0647\u0641\u062a\u0647\u200c\u0633\u062a \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0646\u06af\u0631\u0641\u062a\u06cc</span><button class="btn s" onclick="shareB()">\ud83d\udce4 \u0627\u0631\u0633\u0627\u0644 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646</button></div></div>';
+            if (isT && !D.tasks.length) {
+              var cl = carryList(k);
+              if (cl.list.length) h += '<div class="box warn"><b>' + fa(cl.list.length) + ' \u06a9\u0627\u0631 \u0646\u0627\u062a\u0645\u0648\u0645 \u0627\u0632 ' + jStr(cl.k) + '</b><div class="mut">\u06a9\u0627\u0631\u0647\u0627\u06cc D \u0645\u0646\u062a\u0642\u0644 \u0646\u0645\u06cc\u0634\u0646.</div><button class="btn s" onclick="carry()">\u2b05\ufe0f \u0627\u0646\u062a\u0642\u0627\u0644 \u0628\u0647 \u0627\u0645\u0631\u0648\u0632</button> <button class="btn g s" onclick="skipCarry()">\u0646\u0647\u060c \u0627\u0632 \u0635\u0641\u0631</button></div>';
+            }
+            h += '<div class="box"><h3>\u0648\u0636\u0639\u06cc\u062a</h3><label>\u0627\u0646\u0631\u0698\u06cc</label>' + chips(EN, 5, D.e, 'setE') +
+              '<div class="row"><div class="f1"><label>\u062e\u0648\u0627\u0628 \u062f\u06cc\u0634\u0628 (\u0633\u0627\u0639\u062a)</label><input inputmode="decimal" value="' + esc(D.sl) + '" onchange="setF(\'sl\',this.value)"></div>' +
+              '<div class="f1"><label>\u0628\u06cc\u062f\u0627\u0631\u06cc</label><input type="time" value="' + esc(D.wk || S.set.wk) + '" onchange="setF(\'wk\',this.value)"></div>' +
+              '<div class="f1"><label>\u062e\u0648\u0627\u0628 \u0627\u0645\u0634\u0628</label><input type="time" value="' + esc(D.bt || S.set.bt) + '" onchange="setF(\'bt\',this.value)"></div></div>' +
+              '<label>\u062a\u0639\u0647\u062f \u0642\u0637\u0639\u06cc \u062f\u06cc\u06af\u0647 (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input value="' + esc(D.c) + '" onchange="setF(\'c\',this.value)"></div>';
+            h += rShifts(D);
+            h += '<div id="dyn">' + rDyn() + '</div>';
+            h += rRoutines(D, k);
+            h += '<div class="box"><div class="row"><h3>\u06a9\u0627\u0631\u0647\u0627</h3><span><button class="btn s" onclick="openForm()">\u2795 \u06a9\u0627\u0631</button> <button class="btn g s" onclick="RP=!RP;FORM=false;EDIT=null;render()">\ud83d\udd04 \u062a\u0646\u0638\u06cc\u0645 \u0645\u062c\u062f\u062f</button></span></div>';
+            if (RP) h += rReplan(D);
+            if (FORM && !EDIT) h += rForm(null);
+            var ord = D.tasks.slice().sort(function (a, b) {
+              var ra = a.r == 'main' ? 0 : a.r == 'sec' ? 1 : 2, rb = b.r == 'main' ? 0 : b.r == 'sec' ? 1 : 2;
+              var ta = a.tm ? tmin(a.tm) : 99999, tb = b.tm ? tmin(b.tm) : 99999;
+              return ((a.d ? 1 : 0) - (b.d ? 1 : 0)) || (ra - rb) || (ta - tb) || (GORD[b.g] - GORD[a.g]);
+            });
+            if (!ord.length && !FORM) h += '<div class="mut">\u0647\u0646\u0648\u0632 \u06a9\u0627\u0631\u06cc \u0646\u06cc\u0633\u062a. \u00ab\u0631\u0648\u06cc \u06a9\u0633\u0628\u200c\u0648\u06a9\u0627\u0631 \u06a9\u0627\u0631 \u06a9\u0646\u00bb \u0646\u0646\u0648\u06cc\u0633\u061b \u0628\u0646\u0648\u06cc\u0633 \u00ab\u0641\u0631\u0648\u0634 \u06f7 \u0631\u0648\u0632 \u0627\u062e\u06cc\u0631 \u0631\u0648 \u062b\u0628\u062a \u06a9\u0646 \u0648 \u06f3 \u06a9\u0627\u0644\u0627\u06cc \u06a9\u0645\u200c\u06af\u0631\u062f\u0634 \u0631\u0648 \u067e\u06cc\u062f\u0627 \u06a9\u0646\u00bb.</div>';
+            ord.forEach(function (t) { h += EDIT == t.id ? rForm(t) : rTask(t); });
+            h += '</div>';
+            return h;
           }
           function rDyn() {
-            var k = dk(), D = day(k), c = cap(D), h = '';
-            if (c.avail) {
-              var p = c.avail ? Math.min(100, Math.round(c.plan / c.avail * 100)) : 0, cls = c.over > 0 ? 'ov' : c.plan > c.lim * 0.85 ? 'hi' : '';
-              h += '<div class="box"><div class="row"><b>\u0638\u0631\u0641\u06cc\u062a</b><span class="mut">' + fa(c.plan) + ' \u0627\u0632 ' + fa(c.avail) + ' \u062f\u0642\u06cc\u0642\u0647 \u00b7 \u0633\u0642\u0641 \u0627\u0645\u0646 ' + fa(c.lim) + '</span></div><div class="bar"><i class="' + cls + '" style="width:' + p + '%"></i></div>' +
-                '<div class="mut sm">\u0627\u0646\u062c\u0627\u0645\u200c\u0634\u062f\u0647: ' + fa(c.done) + ' \u062f\u0642\u06cc\u0642\u0647 \u00b7 \u0645\u0648\u0646\u062f\u0647: ' + fa(c.left) + ' \u062f\u0642\u06cc\u0642\u0647</div></div>';
-            }
-            var adv = advice(D);
+            var k = SEL, D = day(k), c = cap(D, k), h = '';
+            var p = c.avail ? Math.min(100, Math.round(c.plan / c.avail * 100)) : 0, cls = c.over > 0 ? 'ov' : c.plan > c.lim * 0.85 ? 'hi' : '';
+            h += '<div class="box"><div class="row"><b>\u23f3 \u0638\u0631\u0641\u06cc\u062a</b><span class="mut">' + fa(c.plan) + ' \u0627\u0632 ' + fa(c.avail) + ' \u062f\u0642\u06cc\u0642\u0647 \u00b7 \u0633\u0642\u0641 \u0627\u0645\u0646 ' + fa(c.lim) + '</span></div><div class="bar"><i class="' + cls + '" style="width:' + p + '%"></i></div>' +
+              '<div class="mut sm">\u0628\u06cc\u062f\u0627\u0631\u06cc ' + fmtM(c.af.win) + ' \u2212 \u0645\u063a\u0627\u0632\u0647 ' + fmtM(c.af.shop) + ' \u2212 \u062b\u0627\u0628\u062a\u200c\u0647\u0627 ' + fmtM(c.af.rt) + ' = \u0622\u0632\u0627\u062f ' + fmtM(c.af.free) + (c.man ? ' (\u0627\u0644\u0627\u0646 \u062f\u0633\u062a\u06cc: ' + fmtM(c.avail) + ')' : '') + '</div>' +
+              '<div class="row"><span class="mut sm">\u0632\u0645\u0627\u0646 \u0622\u0632\u0627\u062f \u062f\u0633\u062a\u06cc (\u0633\u0627\u0639\u062a\u060c \u062e\u0627\u0644\u06cc = \u062e\u0648\u062f\u06a9\u0627\u0631)</span><input style="width:90px" inputmode="decimal" value="' + esc(D.h) + '" onchange="setF(\'h\',this.value)"></div></div>';
+            var adv = advice(D, k);
             if (adv.length) {
               h += '<div class="box' + (adv[0][0] == 'l' ? ' low' : adv[0][0] == 'o' ? ' ok' : ' warn') + '"><h3>\ud83e\udded \u067e\u06cc\u0634\u0646\u0647\u0627\u062f \u0633\u06cc\u0633\u062a\u0645</h3>';
               adv.forEach(function (a) { h += '<div class="adv">\u2022 ' + a[1] + (a[2] == 'trim' ? ' <button class="btn s" onclick="doTrim()">\u0627\u0646\u062a\u0642\u0627\u0644 \u062e\u0648\u062f\u06a9\u0627\u0631</button>' : '') + '</div>'; });
               h += '</div>';
             }
-            h += '<div class="box"><div class="row"><h3>\u06a9\u0627\u0631\u0647\u0627\u06cc \u0627\u0645\u0631\u0648\u0632</h3><span><button class="btn s" onclick="openForm()">\u2795 \u06a9\u0627\u0631 \u062c\u062f\u06cc\u062f</button> <button class="btn g s" onclick="RP=!RP;FORM=false;EDIT=null;render()">\ud83d\udd04 \u062a\u0646\u0638\u06cc\u0645 \u0645\u062c\u062f\u062f</button></span></div>';
-            if (RP) h += rReplan(D);
-            if (FORM && !EDIT) h += rForm(null);
-            var ord = D.tasks.slice().sort(function (a, b) {
-              var ra = a.r == 'main' ? 0 : a.r == 'sec' ? 1 : 2, rb = b.r == 'main' ? 0 : b.r == 'sec' ? 1 : 2;
-              return ((a.d ? 1 : 0) - (b.d ? 1 : 0)) || (ra - rb) || (GORD[b.g] - GORD[a.g]);
-            });
-            if (!ord.length && !FORM) h += '<div class="mut">\u0647\u0646\u0648\u0632 \u06a9\u0627\u0631\u06cc \u0646\u06cc\u0633\u062a. \u0628\u0627 \u2795 \u0627\u0636\u0627\u0641\u0647 \u06a9\u0646. \u0646\u06a9\u062a\u0647: \u00ab\u0631\u0648\u06cc \u06a9\u0633\u0628\u200c\u0648\u06a9\u0627\u0631 \u06a9\u0627\u0631 \u06a9\u0646\u00bb \u0646\u0646\u0648\u06cc\u0633\u061b \u0628\u0646\u0648\u06cc\u0633 \u00ab\u0641\u0631\u0648\u0634 \u06f7 \u0631\u0648\u0632 \u0627\u062e\u06cc\u0631 \u0631\u0648 \u062b\u0628\u062a \u06a9\u0646 \u0648 \u06f3 \u06a9\u0627\u0644\u0627\u06cc \u06a9\u0645\u200c\u06af\u0631\u062f\u0634 \u0631\u0648 \u067e\u06cc\u062f\u0627 \u06a9\u0646\u00bb.</div>';
-            ord.forEach(function (t) { h += EDIT == t.id ? rForm(t) : rTask(t); });
-            h += '</div>';
-            var done = D.tasks.filter(function (t) { return t.d; }).length;
-            if (D.tasks.length) h += '<div class="box"><div class="row"><span>' + fa(done) + ' \u0627\u0632 ' + fa(D.tasks.length) + ' \u0627\u0646\u062c\u0627\u0645 \u0634\u062f</span><button class="btn g s" onclick="go(\'night\')">\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0634\u0628</button></div></div>';
             return h;
           }
+          function refreshDyn() { var el = $('dyn'); if (el) el.innerHTML = rDyn(); }
+          function rShifts(D) {
+            var h = '<div class="box"><div class="row"><h3>\ud83c\udfea \u0646\u0648\u0628\u062a\u200c\u0647\u0627\u06cc \u0645\u063a\u0627\u0632\u0647</h3><span class="mut sm">' + (D.sh.length ? '\u062c\u0645\u0639 ' + fmtM(shopM(D)) : '') + '</span></div>';
+            D.sh.forEach(function (x, i) {
+              h += '<div class="shf"><div class="row" style="flex-wrap:nowrap"><b class="sm">\u0646\u0648\u0628\u062a ' + fa(i + 1) + '</b>' +
+                '<input type="time" style="flex:1" value="' + esc(x.s) + '" onchange="shSet(' + i + ',\'s\',this.value)"><span class="mut">\u062a\u0627</span>' +
+                '<input type="time" style="flex:1" value="' + esc(x.e) + '" onchange="shSet(' + i + ',\'e\',this.value)">' +
+                '<span class="chip' + (x.al ? ' on' : '') + '" onclick="shAl(' + i + ')">\ud83d\udd14</span><span class="chip" onclick="shDel(' + i + ')">\u2715</span></div></div>';
+            });
+            h += '<div>' + (D.sh.length < 3 ? '<button class="btn g s" onclick="shAdd()">\u2795 \u0646\u0648\u0628\u062a ' + fa(D.sh.length + 1) + '</button> ' : '') +
+              (!D.sh.length ? '<button class="btn g s" onclick="shCopy()">\ud83d\udccb \u0645\u062b\u0644 \u0622\u062e\u0631\u06cc\u0646 \u0631\u0648\u0632</button>' : '') + '</div>' +
+              '<div class="mut sm">\u0628\u0631 \u0627\u0633\u0627\u0633 \u0627\u0646\u0631\u0698\u06cc\u062a \u062a\u0646\u0638\u06cc\u0645\u0634 \u06a9\u0646. \ud83d\udd14 = \u06cc\u0627\u062f\u0622\u0648\u0631 \u0633\u0631 \u0634\u0631\u0648\u0639 \u0646\u0648\u0628\u062a.</div></div>';
+            return h;
+          }
+          function shAdd() { var D = day(SEL), n = D.sh.length; D.sh.push(n ? { s: '17:00', e: '22:00', al: false } : { s: '09:00', e: '14:00', al: false }); save(); render(); }
+          function shSet(i, f, v) { var D = day(SEL); D.sh[i][f] = v; save(); refreshDyn(); }
+          function shAl(i) { var D = day(SEL); D.sh[i].al = !D.sh[i].al; save(); render(); }
+          function shDel(i) { var D = day(SEL); D.sh.splice(i, 1); save(); render(); }
+          function shCopy() {
+            for (var i = 1; i <= 14; i++) { var P = peek(addD(SEL, -i)); if (P && P.sh.length) { day(SEL).sh = JSON.parse(JSON.stringify(P.sh)); save(); render(); toast('\ud83d\udccb \u0646\u0648\u0628\u062a\u200c\u0647\u0627\u06cc ' + jStr(addD(SEL, -i)) + ' \u06a9\u067e\u06cc \u0634\u062f'); return; } }
+            toast('\u0631\u0648\u0632 \u0642\u0628\u0644\u06cc \u0628\u0627 \u0646\u0648\u0628\u062a \u067e\u06cc\u062f\u0627 \u0646\u0634\u062f');
+          }
+          function rRoutines(D, k) {
+            var list = rtFor(k), now = k == dk() ? tmin(hmOf(Date.now())) : -1;
+            var done = list.filter(function (x) { return D.rt[x.key]; }).length;
+            var h = '<div class="box"><div class="row"><h3>\ud83d\udccc \u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a</h3><span class="mut sm">' + fa(done) + ' \u0627\u0632 ' + fa(list.length) + ' <button class="btn g s" onclick="go(\'set\');setTimeout(function(){var e=$(\'rtbox\');if(e)e.scrollIntoView();},50)">\u270f\ufe0f \u0648\u06cc\u0631\u0627\u06cc\u0634</button></span></div>';
+            if (!list.length) h += '<div class="mut">\u06a9\u0627\u0631 \u062b\u0627\u0628\u062a\u06cc \u0628\u0631\u0627\u06cc \u0627\u06cc\u0646 \u0631\u0648\u0632 \u062a\u0639\u0631\u06cc\u0641 \u0646\u0634\u062f\u0647.</div>';
+            list.forEach(function (x) {
+              var ok = !!D.rt[x.key], late = !ok && now >= 0 && tmin(x.tm) + 30 < now;
+              h += '<div class="task' + (ok ? ' done' : '') + '"><div class="row" style="flex-wrap:nowrap"><span class="ck' + (ok ? ' on' : late ? ' late' : '') + '" onclick="rtTgl(\'' + x.key + '\')">' + (ok ? '\u2713' : '') + '</span>' +
+                '<div class="tt f1"><b>' + esc(x.r.n) + '</b> <span class="tm">' + fa(x.tm) + '</span>' + (x.r.al ? ' \ud83d\udd14' : '') + (late ? ' <span class="sm" style="color:#E0A040">\u06af\u0630\u0634\u062a\u0647</span>' : '') +
+                (ok && typeof D.rt[x.key] == 'number' ? '<span class="mut sm"> \u00b7 ' + fa(hmOf(D.rt[x.key])) + '</span>' : '') + '</div></div></div>';
+            });
+            return h + '</div>';
+          }
+          function rtTgl(key) { var D = day(SEL); if (D.rt[key]) delete D.rt[key]; else D.rt[key] = Date.now(); save(); render(); }
           function rTask(t) {
             return '<div class="task' + (t.d ? ' done' : '') + '"><div class="row" style="flex-wrap:nowrap"><span class="ck' + (t.d ? ' on' : '') + '" onclick="tgl(\'' + t.id + '\')">' + (t.d ? '\u2713' : '') + '</span>' +
-              '<div class="tt" onclick="EDIT=\'' + t.id + '\';FORM=false;render()"><b>' + (t.r == 'main' ? '\u2b50 ' : t.r == 'sec' ? '\u2606 ' : '') + esc(t.t) + '</b><br><span class="g g' + t.g + '">' + t.g + '</span><span class="mut sm">' + (num(t.m) ? fa(num(t.m)) + ' \u062f\u0642\u06cc\u0642\u0647' : '\u0628\u062f\u0648\u0646 \u0632\u0645\u0627\u0646') + (t.f ? ' \u00b7 \u0627\u0632 ' + jStr(t.f) : '') + '</span>' +
+              '<div class="tt f1" onclick="EDIT=\'' + t.id + '\';FORM=false;render()"><b>' + (t.r == 'main' ? '\u2b50 ' : t.r == 'sec' ? '\u2606 ' : '') + esc(t.t) + '</b><br><span class="g g' + t.g + '">' + t.g + '</span>' +
+              (t.tm ? '<span class="tm">\u23f0 ' + fa(t.tm) + (t.al ? ' \ud83d\udd14' : '') + '</span>' : '') + '<span class="mut sm">' + (num(t.m) ? fa(num(t.m)) + ' \u062f\u0642\u06cc\u0642\u0647' : '\u0628\u062f\u0648\u0646 \u0632\u0645\u0627\u0646') + (t.f ? ' \u00b7 \u0627\u0632 ' + jStr(t.f) : '') + '</span>' +
               (t.na ? '<div class="mut sm">\u25b6\ufe0f ' + esc(t.na) + '</div>' : '') + (t.end ? '<div class="mut sm">\ud83c\udfc1 ' + esc(t.end) + '</div>' : '') + '</div></div>' +
               (t.d ? '' : '<div style="margin-top:4px"><button class="btn g s" onclick="setMain(\'' + t.id + '\')">\u2b50 \u0627\u0635\u0644\u06cc</button> <button class="btn g s" onclick="setSec(\'' + t.id + '\')">\u2606 \u062b\u0627\u0646\u0648\u06cc\u0647</button> <button class="btn g s" onclick="tmrw(\'' + t.id + '\')">\u27a1\ufe0f \u0641\u0631\u062f\u0627</button></div>') + '</div>';
           }
           function rForm(t) {
-            var x = t || { t: '', g: 'B', m: '', na: '', end: '', r: '' }, g = '';
+            var x = t || { t: '', g: 'B', m: '', na: '', end: '', tm: '', al: false, r: '' }, g = '';
             ['A', 'B', 'C', 'D'].forEach(function (q) { g += '<span class="chip' + (x.g == q ? ' on' : '') + '" onclick="fG(\'' + q + '\')" id="fg' + q + '">' + q + ' \u00b7 ' + GR[q] + '</span>'; });
-            return '<div class="box" style="margin:8px 0;background:#0F2138"><label>\u0639\u0646\u0648\u0627\u0646 \u06a9\u0627\u0631</label><input id="fT" value="' + esc(x.t) + '">' +
+            return '<div class="box inn"><label>\u0639\u0646\u0648\u0627\u0646 \u06a9\u0627\u0631</label><input id="fT" value="' + esc(x.t) + '">' +
               '<label>\u06af\u0631\u0648\u0647</label><div class="chips">' + g + '</div><input type="hidden" id="fGv" value="' + x.g + '">' +
-              '<label>\u0632\u0645\u0627\u0646 \u062a\u0642\u0631\u06cc\u0628\u06cc (\u062f\u0642\u06cc\u0642\u0647)</label><input id="fM" inputmode="numeric" value="' + esc(x.m) + '">' +
+              '<div class="row"><div class="f1"><label>\u0632\u0645\u0627\u0646 \u062a\u0642\u0631\u06cc\u0628\u06cc (\u062f\u0642\u06cc\u0642\u0647)</label><input id="fM" inputmode="numeric" value="' + esc(x.m) + '"></div>' +
+              '<div class="f1"><label>\u0633\u0627\u0639\u062a (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="fTm" type="time" value="' + esc(x.tm) + '"></div></div>' +
+              '<label><input type="checkbox" id="fAl" ' + (x.al ? 'checked' : '') + '> \ud83d\udd14 \u0622\u0644\u0627\u0631\u0645 \u0633\u0631 \u0647\u0645\u06cc\u0646 \u0633\u0627\u0639\u062a</label><br><br>' +
               '<label>\u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc (\u0627\u0648\u0644\u06cc\u0646 \u062d\u0631\u06a9\u062a \u0641\u06cc\u0632\u06cc\u06a9\u06cc)</label><input id="fN" value="' + esc(x.na) + '">' +
               '<label>\u0645\u0639\u06cc\u0627\u0631 \u067e\u0627\u06cc\u0627\u0646 (\u06a9\u0650\u06cc \u062a\u0645\u0648\u0645\u0647\u061f)</label><input id="fE" value="' + esc(x.end) + '">' +
               '<button class="btn" onclick="saveTask(' + (t ? '\'' + t.id + '\'' : 'null') + ')">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="FORM=false;EDIT=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' +
               (t ? ' <button class="btn r" onclick="delTask(\'' + t.id + '\')">\ud83d\uddd1 \u062d\u0630\u0641</button>' + (t.d ? '' : ' <button class="btn g" onclick="setNone(\'' + t.id + '\')">\u0639\u0627\u062f\u06cc \u06a9\u0646</button>') : '') + '</div>';
           }
           function rReplan(D) {
-            return '<div class="box" style="margin:8px 0;background:#0F2138"><b>\ud83d\udd04 \u0634\u0631\u0627\u06cc\u0637 \u0639\u0648\u0636 \u0634\u062f\u061f</b><div class="mut sm">\u0645\u062b\u0644\u0627\u064b \u0645\u063a\u0627\u0632\u0647 \u0634\u0644\u0648\u063a \u0634\u062f \u06cc\u0627 \u06a9\u0627\u0631\u06cc \u0628\u06cc\u0634\u062a\u0631 \u0637\u0648\u0644 \u06a9\u0634\u06cc\u062f. \u0628\u0631\u0646\u0627\u0645\u0647 \u0631\u0648 \u0628\u0627 \u0638\u0631\u0641\u06cc\u062a \u062c\u062f\u06cc\u062f \u0645\u06cc\u200c\u0686\u06cc\u0646\u06cc\u0645\u060c \u0646\u0647 \u0628\u0647 \u0647\u0631 \u0642\u06cc\u0645\u062a\u06cc.</div>' +
+            return '<div class="box inn"><b>\ud83d\udd04 \u0634\u0631\u0627\u06cc\u0637 \u0639\u0648\u0636 \u0634\u062f\u061f</b><div class="mut sm">\u0645\u062b\u0644\u0627\u064b \u0645\u063a\u0627\u0632\u0647 \u0634\u0644\u0648\u063a \u0634\u062f \u06cc\u0627 \u06a9\u0627\u0631\u06cc \u0628\u06cc\u0634\u062a\u0631 \u0637\u0648\u0644 \u06a9\u0634\u06cc\u062f. \u0628\u0631\u0646\u0627\u0645\u0647 \u0631\u0648 \u0628\u0627 \u0638\u0631\u0641\u06cc\u062a \u062c\u062f\u06cc\u062f \u0645\u06cc\u200c\u0686\u06cc\u0646\u06cc\u0645\u060c \u0646\u0647 \u0628\u0647 \u0647\u0631 \u0642\u06cc\u0645\u062a\u06cc.</div>' +
               '<label>\u0627\u0646\u0631\u0698\u06cc \u0627\u0644\u0627\u0646</label>' + chips(EN, 5, 0, 'rpE') + '<input type="hidden" id="rpEv" value="' + (D.e || 0) + '">' +
-              '<label>\u0686\u0646\u062f \u0633\u0627\u0639\u062a \u0622\u0632\u0627\u062f \u062a\u0627 \u0622\u062e\u0631 \u0627\u0645\u0631\u0648\u0632 \u0645\u0648\u0646\u062f\u0647\u061f</label><input id="rpH" inputmode="decimal">' +
+              '<label>\u0686\u0646\u062f \u0633\u0627\u0639\u062a \u0622\u0632\u0627\u062f \u062a\u0627 \u0622\u062e\u0631 \u0631\u0648\u0632 \u0645\u0648\u0646\u062f\u0647\u061f</label><input id="rpH" inputmode="decimal">' +
               '<label>\u0686\u06cc \u0634\u062f\u061f (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="rpN"><button class="btn" onclick="doReplan()">\u2705 \u062f\u0648\u0628\u0627\u0631\u0647 \u0628\u0686\u06cc\u0646</button></div>';
           }
-          function setE(n) { day(dk()).e = n; save(); for (var i = 1; i <= 5; i++) { var el = $('setE' + i); if (el) el.className = 'chip' + (i == n ? ' on' : ''); } var d = $('dyn'); if (d) d.innerHTML = rDyn(); }
-          function setF(f, v) { day(dk())[f] = v; save(); var el = $('dyn'); if (el) el.innerHTML = rDyn(); }
-          function openForm() { FORM = true; EDIT = null; render(); setTimeout(function () { var el = $('fT'); if (el) el.focus(); }, 50); }
+          function setE(n) { day(SEL).e = n; save(); hiChip('setE', n); refreshDyn(); }
+          function setF(f, v) { day(SEL)[f] = v; save(); refreshDyn(); }
+          function openForm() { FORM = true; EDIT = null; RP = false; render(); setTimeout(function () { var el = $('fT'); if (el) el.focus(); }, 50); }
           function fG(q) { $('fGv').value = q; ['A', 'B', 'C', 'D'].forEach(function (z) { $('fg' + z).className = 'chip' + (z == q ? ' on' : ''); }); }
           function saveTask(id) {
-            var D = day(dk()), title = $('fT').value.replace(/^\s+|\s+$/g, '');
+            var D = day(SEL), title = trim($('fT').value);
             if (!title) { toast('\u0639\u0646\u0648\u0627\u0646 \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
             var t = id ? findT(D, id) : null;
             if (!t) { t = { id: uid(), r: '', d: false }; D.tasks.push(t); }
             t.t = title; t.g = $('fGv').value; t.m = String(num($('fM').value) || ''); t.na = $('fN').value; t.end = $('fE').value;
+            t.tm = $('fTm').value || ''; t.al = !!($('fAl').checked && t.tm);
+            if ($('fAl').checked && !t.tm) toast('\u0628\u0631\u0627\u06cc \u0622\u0644\u0627\u0631\u0645\u060c \u0633\u0627\u0639\u062a \u0631\u0648 \u0647\u0645 \u0628\u0630\u0627\u0631');
             FORM = false; EDIT = null; save(); render();
           }
-          function delTask(id) { if (!confirm('\u0627\u06cc\u0646 \u06a9\u0627\u0631 \u062d\u0630\u0641 \u0628\u0634\u0647\u061f')) return; var D = day(dk()); D.tasks = D.tasks.filter(function (t) { return t.id != id; }); EDIT = null; save(); render(); }
-          function tgl(id) { var t = findT(day(dk()), id); if (!t) return; t.d = !t.d; t.dt = t.d ? Date.now() : 0; save(); render(); if (t.d && t.r == 'main') toast('\u2b50 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc \u0627\u0645\u0631\u0648\u0632 \u0627\u0646\u062c\u0627\u0645 \u0634\u062f'); }
-          function setMain(id) { var D = day(dk()); D.tasks.forEach(function (t) { if (t.r == 'main') t.r = 'sec'; }); var t = findT(D, id); t.r = 'main'; save(); render(); }
+          function delTask(id) { if (!confirm('\u0627\u06cc\u0646 \u06a9\u0627\u0631 \u062d\u0630\u0641 \u0628\u0634\u0647\u061f')) return; var D = day(SEL); D.tasks = D.tasks.filter(function (t) { return t.id != id; }); EDIT = null; save(); render(); }
+          function tgl(id) { var t = findT(day(SEL), id); if (!t) return; t.d = !t.d; t.dt = t.d ? Date.now() : 0; save(); render(); if (t.d && t.r == 'main') toast('\u2b50 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc \u0627\u0646\u062c\u0627\u0645 \u0634\u062f'); }
+          function setMain(id) { var D = day(SEL); D.tasks.forEach(function (t) { if (t.r == 'main') t.r = 'sec'; }); findT(D, id).r = 'main'; save(); render(); }
           function setSec(id) {
-            var D = day(dk()), t = findT(D, id), n = D.tasks.filter(function (x) { return x.r == 'sec' && !x.d; }).length;
+            var D = day(SEL), t = findT(D, id), n = D.tasks.filter(function (x) { return x.r == 'sec' && !x.d; }).length;
             if (t.r != 'sec' && n >= 2) { toast('\u062d\u062f\u0627\u06a9\u062b\u0631 \u06f2 \u0627\u0648\u0644\u0648\u06cc\u062a \u062b\u0627\u0646\u0648\u06cc\u0647. \u06cc\u06a9\u06cc \u0631\u0648 \u0639\u0627\u062f\u06cc \u06a9\u0646'); return; }
             t.r = t.r == 'sec' ? '' : 'sec'; save(); render();
           }
-          function setNone(id) { var t = findT(day(dk()), id); t.r = ''; EDIT = null; save(); render(); }
-          function tmrw(id) { var k = dk(), D = day(k), t = findT(D, id); moveTask(k, t, addD(k, 1)); save(); render(); toast('\u27a1\ufe0f \u0631\u0641\u062a \u0628\u0631\u0627\u06cc \u0641\u0631\u062f\u0627'); }
+          function setNone(id) { findT(day(SEL), id).r = ''; EDIT = null; save(); render(); }
+          function tmrw(id) { var t = findT(day(SEL), id); moveTask(SEL, t, addD(SEL, 1)); save(); render(); toast('\u27a1\ufe0f \u0631\u0641\u062a \u0628\u0631\u0627\u06cc \u0631\u0648\u0632 \u0628\u0639\u062f'); }
           function doTrim() {
-            var k = dk(), D = day(k), list = trimPlan(D);
+            var k = SEL, D = day(k), list = trimPlan(D, k);
             if (!list.length) { toast('\u0686\u06cc\u0632\u06cc \u0628\u0631\u0627\u06cc \u0627\u0646\u062a\u0642\u0627\u0644 \u0646\u06cc\u0633\u062a\u061b \u06a9\u0627\u0631\u0647\u0627\u06cc A \u0648 \u0627\u0635\u0644\u06cc \u062f\u0633\u062a \u0646\u0645\u06cc\u200c\u062e\u0648\u0631\u0646'); return; }
-            if (!confirm(fa(list.length) + ' \u06a9\u0627\u0631 \u0628\u0631\u0647 \u0628\u0631\u0627\u06cc \u0641\u0631\u062f\u0627\u061f\n\n' + list.map(function (t) { return '\u2022 ' + t.g + ' ' + t.t; }).join('\n'))) return;
+            if (!confirm(fa(list.length) + ' \u06a9\u0627\u0631 \u0628\u0631\u0647 \u0628\u0631\u0627\u06cc \u0631\u0648\u0632 \u0628\u0639\u062f\u061f\n\n' + list.map(function (t) { return '\u2022 ' + t.g + ' ' + t.t; }).join('\n'))) return;
             list.forEach(function (t) { moveTask(k, t, addD(k, 1)); });
             save(); render(); toast('\u2705 \u0628\u0631\u0646\u0627\u0645\u0647 \u0633\u0628\u06a9 \u0634\u062f');
           }
-          function rpE(n) { $('rpEv').value = n; for (var i = 1; i <= 5; i++) { var el = $('rpE' + i); if (el) el.className = 'chip' + (i == n ? ' on' : ''); } }
+          function rpE(n) { $('rpEv').value = n; hiChip('rpE', n); }
           function doReplan() {
-            var D = day(dk()), e = +$('rpEv').value, hh = $('rpH').value, d = new Date();
+            var D = day(SEL), e = +$('rpEv').value, hh = $('rpH').value, d = new Date();
             if (!num(hh)) { toast('\u0633\u0627\u0639\u062a\u200c\u0647\u0627\u06cc \u0645\u0648\u0646\u062f\u0647 \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
-            var doneM = cap(D).done;
+            var doneM = cap(D, SEL).done;
             D.rp.push({ tm: pad(d.getHours()) + ':' + pad(d.getMinutes()), e: e, h: num(hh), n: $('rpN').value });
             if (e) D.e = e;
             D.h = String(r1(num(hh) + doneM / 60));
             RP = false; save(); render();
-            if (trimPlan(D).length) setTimeout(doTrim, 200); else toast('\u2705 \u0628\u0627 \u0638\u0631\u0641\u06cc\u062a \u062c\u062f\u06cc\u062f \u062c\u0648\u0631 \u062f\u0631\u0645\u06cc\u0627\u062f');
+            if (trimPlan(D, SEL).length) setTimeout(doTrim, 200); else toast('\u2705 \u0628\u0627 \u0638\u0631\u0641\u06cc\u062a \u062c\u062f\u06cc\u062f \u062c\u0648\u0631 \u062f\u0631\u0645\u06cc\u0627\u062f');
           }
-          function carry() {
-            var k = dk(), cl = carryList(k);
-            cl.list.forEach(function (t) { moveTask(cl.k, t, k); });
-            save(); render(); toast('\u2705 ' + fa(cl.list.length) + ' \u06a9\u0627\u0631 \u0645\u0646\u062a\u0642\u0644 \u0634\u062f');
-          }
-          function skipCarry() { var cl = carryList(dk()); cl.list.forEach(function (t) { t.mv = 'skip'; }); save(); render(); }
+          function carry() { var k = SEL, cl = carryList(k); cl.list.forEach(function (t) { moveTask(cl.k, t, k); }); save(); render(); toast('\u2705 ' + fa(cl.list.length) + ' \u06a9\u0627\u0631 \u0645\u0646\u062a\u0642\u0644 \u0634\u062f'); }
+          function skipCarry() { carryList(SEL).list.forEach(function (t) { t.mv = 'skip'; }); save(); render(); }
 
-          /* night */
-          var RV = null;
+          /* ---------- mood ---------- */
+          function rMood() {
+            var h = '<div class="box"><h3>\u0627\u0644\u0627\u0646 \u0686\u0647 \u062d\u0633\u06cc \u062f\u0627\u0631\u06cc\u061f</h3><div class="mut sm">\u0633\u0627\u0639\u062a \u0648 \u062a\u0627\u0631\u06cc\u062e \u062e\u0648\u062f\u06a9\u0627\u0631 \u062b\u0628\u062a \u0645\u06cc\u0634\u0647.</div><div class="mg" style="margin-top:8px">';
+            MOODS.forEach(function (m) { h += '<div class="mb ' + (m[3] < 0 ? 'neg' : 'pos') + (MF && MF.k == m[0] ? ' on' : '') + '" onclick="mPick(\'' + m[0] + '\')"><span>' + m[1] + '</span>' + m[2] + '</div>'; });
+            h += '</div>';
+            if (MF) {
+              var o = moodOf(MF.k);
+              h += '<div class="box inn"><b>' + o[1] + ' ' + o[2] + '</b> <span class="mut sm">\u00b7 ' + fa(hmOf(Date.now())) + '</span><label><br>\u0634\u062f\u062a</label>' + chips(INT, 5, MF.i, 'mI') +
+                '<label>\u0686\u06cc \u0634\u062f\u061f (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc\u060c \u06a9\u0648\u062a\u0627\u0647)</label><input id="mN" value="' + esc(MF.n) + '" placeholder="\u0645\u062b\u0644\u0627\u064b: \u0645\u0634\u062a\u0631\u06cc \u0628\u062f\u062d\u0633\u0627\u0628\u060c \u0628\u0639\u062f \u0627\u0632 \u0646\u0648\u0628\u062a \u062f\u0648\u0645">' +
+                '<button class="btn" onclick="mSave()">\ud83d\udcbe \u062b\u0628\u062a</button> <button class="btn g" onclick="MF=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button></div>';
+            }
+            h += '</div>';
+            var r = stats(lastKeys(7)), mk = Object.keys(r.md).sort(function (a, b) { return r.md[b].n - r.md[a].n; });
+            if (mk.length) {
+              var mx = r.md[mk[0]].n;
+              h += '<div class="box"><h3>\u06f7 \u0631\u0648\u0632 \u0627\u062e\u06cc\u0631</h3>' + mk.map(function (x) { var o = moodOf(x), q = r.md[x]; return '<div class="row"><span>' + o[1] + ' ' + o[2] + '</span><span class="mut sm">' + fa(q.n) + ' \u0628\u0627\u0631 \u00b7 \u0634\u062f\u062a ' + fa(r1(q.i / q.n)) + '</span></div><div class="bar"><i class="' + (o[3] < 0 ? 'pu' : '') + '" style="width:' + Math.round(q.n / mx * 100) + '%"></i></div>'; }).join('');
+              var nb = r.mdNegB;
+              if (nb[0] + nb[1] + nb[2] + nb[3]) h += '<div class="mut sm">\u062d\u0633\u200c\u0647\u0627\u06cc \u0645\u0646\u0641\u06cc \u0628\u0631 \u0627\u0633\u0627\u0633 \u0633\u0627\u0639\u062a: \u0635\u0628\u062d ' + fa(nb[0]) + ' \u00b7 \u0638\u0647\u0631 ' + fa(nb[1]) + ' \u00b7 \u0639\u0635\u0631 ' + fa(nb[2]) + ' \u00b7 \u0634\u0628 ' + fa(nb[3]) + '</div>';
+              h += '<button class="btn g s" onclick="cp(\'mood\')">\ud83d\udccb \u06a9\u067e\u06cc \u0628\u0631\u0627\u06cc \u062a\u062d\u0644\u06cc\u0644 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc</button></div>';
+            }
+            var lim = MDALL ? 0 : Date.now() - 14 * 86400000, list = S.md.filter(function (m) { return m.t >= lim; }).sort(function (a, b) { return b.t - a.t; });
+            h += '<div class="box"><div class="row"><h3>\ud83d\udcd2 \u062c\u062f\u0648\u0644 \u0627\u062d\u0648\u0627\u0644</h3><span class="chip' + (MDALL ? ' on' : '') + '" onclick="MDALL=!MDALL;render()">' + (MDALL ? '\u0647\u0645\u0647' : '\u06f1\u06f4 \u0631\u0648\u0632') + '</span></div>';
+            if (!list.length) h += '<div class="mut">\u0647\u0646\u0648\u0632 \u0686\u06cc\u0632\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647.</div>';
+            else {
+              h += '<table><tr><th>\u0633\u0627\u0639\u062a</th><th>\u062d\u0627\u0644</th><th>\u0634\u062f\u062a</th><th>\u06cc\u0627\u062f\u062f\u0627\u0634\u062a</th><th></th></tr>';
+              var last = '';
+              list.forEach(function (m) {
+                var k = dk(m.t), o = moodOf(m.k);
+                if (k != last) { h += '<tr><td colspan="5" class="dh">' + jStr(k, true) + '</td></tr>'; last = k; }
+                h += '<tr><td>' + fa(hmOf(m.t)) + '</td><td>' + o[1] + ' ' + o[2] + '</td><td class="dots">' + '\u25cf\u25cf\u25cf\u25cf\u25cf'.substring(0, m.i || 0) + '<span style="color:#3A4F6B">' + '\u25cf\u25cf\u25cf\u25cf\u25cf'.substring(0, 5 - (m.i || 0)) + '</span></td><td class="sm" style="text-align:right">' + esc(m.n) + '</td><td><span onclick="mDel(\'' + m.id + '\')">\u2715</span></td></tr>';
+              });
+              h += '</table>';
+            }
+            return h + '</div>';
+          }
+          function mPick(k) { var n = MF && $('mN') ? $('mN').value : ''; MF = { k: k, i: MF ? MF.i : 3, n: n }; render(); }
+          function mI(n) { MF.i = n; hiChip('mI', n); }
+          function mSave() { S.md.push({ id: uid(), t: Date.now(), k: MF.k, i: MF.i || 3, n: trim($('mN').value) }); var o = moodOf(MF.k); MF = null; save(); render(); toast('\u2705 ' + o[1] + ' ' + o[2] + ' \u062b\u0628\u062a \u0634\u062f'); }
+          function mDel(id) { if (!confirm('\u0627\u06cc\u0646 \u062b\u0628\u062a \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f')) return; S.md = S.md.filter(function (m) { return m.id != id; }); save(); render(); }
+
+          /* ---------- night ---------- */
           function rNight() {
-            var k = dk(), D = day(k), v = RV || (D.rv ? JSON.parse(JSON.stringify(D.rv)) : { ob: [], sc: 0, res: '', obt: '', hyp: '', drop: '', next: '' });
+            var k = SEL, D = day(k), v = RV || (D.rv ? JSON.parse(JSON.stringify(D.rv)) : { ob: [], sc: 0, res: '', obt: '', hyp: '', drop: '', next: '' });
             RV = v;
             var done = D.tasks.filter(function (t) { return t.d; }), open = D.tasks.filter(function (t) { return !t.d && !t.mv; });
-            var main = D.tasks.filter(function (t) { return t.r == 'main'; })[0];
+            var main = D.tasks.filter(function (t) { return t.r == 'main'; })[0], rts = rtFor(k), rd = rts.filter(function (x) { return D.rt[x.key]; }).length, md = mdDay(k);
             var h = '<div class="box"><h3>\u0686\u06cc \u0648\u0627\u0642\u0639\u0627\u064b \u0627\u0646\u062c\u0627\u0645 \u0634\u062f\u061f</h3>';
-            if (!D.tasks.length) h += '<div class="mut">\u0627\u0645\u0631\u0648\u0632 \u06a9\u0627\u0631\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647.</div>';
+            if (!D.tasks.length) h += '<div class="mut">\u06a9\u0627\u0631\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647.</div>';
             else {
               h += '<div class="big">' + fa(done.length) + ' \u0627\u0632 ' + fa(D.tasks.length) + '</div>';
               if (main) h += '<div>' + (main.d ? '\u2705' : '\u274c') + ' \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc: ' + esc(main.t) + '</div>';
               if (open.length) h += '<div class="mut sm">\u0646\u0627\u062a\u0645\u0648\u0645: ' + open.map(function (t) { return esc(t.t); }).join('\u060c ') + '</div>';
             }
+            if (rts.length) h += '<div>\ud83d\udccc \u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a: ' + fa(rd) + ' \u0627\u0632 ' + fa(rts.length) + '</div>';
+            if (D.sh.length) h += '<div>\ud83c\udfea \u0645\u063a\u0627\u0632\u0647: ' + fmtM(shopM(D)) + '</div>';
+            if (md.length) h += '<div>\ud83d\udcad ' + md.map(function (m) { return moodOf(m.k)[1]; }).join(' ') + '</div>';
             h += '<div class="mut sm" style="margin-top:6px">\u0627\u06cc\u0646 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0633\u06cc\u0633\u062a\u0645 \u0631\u0648 \u0645\u06cc\u200c\u0633\u0646\u062c\u0647\u060c \u0646\u0647 \u062a\u0648 \u0631\u0648.</div></div>';
-            h += '<div class="box"><label>\u0627\u0645\u062a\u06cc\u0627\u0632 \u0627\u0645\u0631\u0648\u0632 (\u067e\u06cc\u0634\u0631\u0641\u062a \u0648\u0627\u0642\u0639\u06cc\u060c \u0646\u0647 \u062d\u062c\u0645 \u06a9\u0627\u0631)</label>' + chips(null, 5, v.sc, 'rvS') +
-              '<label>\u0645\u0647\u0645\u200c\u062a\u0631\u06cc\u0646 \u0646\u062a\u06cc\u062c\u0647 \u0627\u0645\u0631\u0648\u0632</label><input id="rvRes" value="' + esc(v.res) + '">' +
-              '<label>\u0686\u06cc \u0645\u0627\u0646\u0639 \u0634\u062f\u061f (\u0686\u0646\u062f\u062a\u0627 \u0645\u06cc\u0634\u0647)</label><div class="chips">' + OBS.map(function (o, i) { return '<span class="chip' + (v.ob.indexOf(o) >= 0 ? ' on' : '') + '" onclick="rvO(' + i + ')">' + o + '</span>'; }).join('') + '</div>' +
+            h += '<div class="box"><label>\u0627\u0645\u062a\u06cc\u0627\u0632 \u0631\u0648\u0632 (\u067e\u06cc\u0634\u0631\u0641\u062a \u0648\u0627\u0642\u0639\u06cc\u060c \u0646\u0647 \u062d\u062c\u0645 \u06a9\u0627\u0631)</label>' + chips(null, 5, v.sc, 'rvS') +
+              '<label>\u0645\u0647\u0645\u200c\u062a\u0631\u06cc\u0646 \u0646\u062a\u06cc\u062c\u0647</label><input id="rvRes" value="' + esc(v.res) + '">' +
+              '<label>\u0686\u06cc \u0645\u0627\u0646\u0639 \u0634\u062f\u061f</label><div class="chips">' + OBS.map(function (o, i) { return '<span class="chip' + (v.ob.indexOf(o) >= 0 ? ' on' : '') + '" onclick="rvO(' + i + ')">' + o + '</span>'; }).join('') + '</div>' +
               '<label>\u062a\u0648\u0636\u06cc\u062d \u0645\u0627\u0646\u0639 (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="rvObt" value="' + esc(v.obt) + '">' +
-              '<label>\u06a9\u062f\u0648\u0645 \u0641\u0631\u0636\u06cc\u0647 \u0627\u0645\u0631\u0648\u0632 \u062a\u0623\u06cc\u06cc\u062f \u06cc\u0627 \u0631\u062f \u0634\u062f\u061f (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="rvHyp" value="' + esc(v.hyp) + '" placeholder="\u0645\u062b\u0644\u0627\u064b: \u0628\u0639\u062f \u0627\u0632 \u0645\u063a\u0627\u0632\u0647 \u06a9\u0627\u0631 \u0641\u06a9\u0631\u06cc \u0646\u0645\u06cc\u200c\u062a\u0648\u0646\u0645">' +
+              '<label>\u06a9\u062f\u0648\u0645 \u0641\u0631\u0636\u06cc\u0647 \u062a\u0623\u06cc\u06cc\u062f \u06cc\u0627 \u0631\u062f \u0634\u062f\u061f (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="rvHyp" value="' + esc(v.hyp) + '" placeholder="\u0645\u062b\u0644\u0627\u064b: \u0628\u0639\u062f \u0627\u0632 \u0646\u0648\u0628\u062a \u062f\u0648\u0645 \u06a9\u0627\u0631 \u0641\u06a9\u0631\u06cc \u0646\u0645\u06cc\u200c\u062a\u0648\u0646\u0645">' +
               '<label>\u0686\u06cc \u0628\u0627\u06cc\u062f \u062d\u0630\u0641 \u06cc\u0627 \u0633\u0627\u062f\u0647 \u0628\u0634\u0647\u061f</label><input id="rvDrop" value="' + esc(v.drop) + '">' +
-              '<label>\u0645\u0647\u0645\u200c\u062a\u0631\u06cc\u0646 \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc (\u062e\u0648\u062f\u06a9\u0627\u0631 \u0645\u06cc\u0631\u0647 \u062a\u0648 \u06a9\u0627\u0631\u0647\u0627\u06cc \u0641\u0631\u062f\u0627)</label><input id="rvNext" value="' + esc(v.next) + '">' +
-              '<button class="btn w" onclick="saveRv()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc</button>' + (D.rv ? '<div class="mut sm">\u0630\u062e\u06cc\u0631\u0647 \u0634\u062f\u0647 \u2705 (\u062f\u0648\u0628\u0627\u0631\u0647 \u0630\u062e\u06cc\u0631\u0647 \u06a9\u0646\u06cc\u060c \u0628\u0647\u200c\u0631\u0648\u0632 \u0645\u06cc\u0634\u0647)</div>' : '') + '</div>';
-            if (open.length) h += '<div class="box"><div class="row"><span>' + fa(open.length) + ' \u06a9\u0627\u0631 \u0646\u0627\u062a\u0645\u0648\u0645</span><button class="btn g s" onclick="openTmrw()">\u27a1\ufe0f \u0647\u0645\u0647 \u0628\u0631\u0646 \u0641\u0631\u062f\u0627</button></div><div class="mut sm">\u06a9\u0627\u0631\u0647\u0627\u06cc D \u0645\u0646\u062a\u0642\u0644 \u0646\u0645\u06cc\u0634\u0646.</div></div>';
+              '<label>\u0645\u0647\u0645\u200c\u062a\u0631\u06cc\u0646 \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc (\u062e\u0648\u062f\u06a9\u0627\u0631 \u0645\u06cc\u0631\u0647 \u062a\u0648 \u06a9\u0627\u0631\u0647\u0627\u06cc \u0631\u0648\u0632 \u0628\u0639\u062f)</label><input id="rvNext" value="' + esc(v.next) + '">' +
+              '<button class="btn w" onclick="saveRv()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc</button>' + (D.rv ? '<div class="mut sm">\u0630\u062e\u06cc\u0631\u0647 \u0634\u062f\u0647 \u2705</div>' : '') + '</div>';
+            if (open.length) h += '<div class="box"><div class="row"><span>' + fa(open.length) + ' \u06a9\u0627\u0631 \u0646\u0627\u062a\u0645\u0648\u0645</span><button class="btn g s" onclick="openTmrw()">\u27a1\ufe0f \u0647\u0645\u0647 \u0628\u0631\u0646 \u0631\u0648\u0632 \u0628\u0639\u062f</button></div><div class="mut sm">\u06a9\u0627\u0631\u0647\u0627\u06cc D \u0645\u0646\u062a\u0642\u0644 \u0646\u0645\u06cc\u0634\u0646.</div></div>';
             return h;
           }
           function rvGrab() { if (!$('rvRes')) return; RV.res = $('rvRes').value; RV.obt = $('rvObt').value; RV.hyp = $('rvHyp').value; RV.drop = $('rvDrop').value; RV.next = $('rvNext').value; }
-          function rvS(n) { rvGrab(); RV.sc = n; render(); }
+          function rvS(n) { rvGrab(); RV.sc = n; hiChip('rvS', n); }
           function rvO(i) { rvGrab(); var o = OBS[i], p = RV.ob.indexOf(o); if (p >= 0) RV.ob.splice(p, 1); else RV.ob.push(o); render(); }
           function saveRv() {
             rvGrab();
-            var k = dk(), D = day(k), old = D.rv;
+            var k = SEL, D = day(k), old = D.rv;
             if (!RV.sc) { toast('\u0627\u0645\u062a\u06cc\u0627\u0632 \u0631\u0648\u0632 \u0631\u0648 \u0628\u0632\u0646'); return; }
             RV.t = Date.now();
             D.rv = JSON.parse(JSON.stringify(RV));
-            var nx = String(RV.next || '').replace(/^\s+|\s+$/g, ''), T = day(addD(k, 1));
+            var nx = trim(RV.next), T = day(addD(k, 1));
             if (old && old.nid) T.tasks = T.tasks.filter(function (t) { return t.id != old.nid; });
-            if (nx) { var n = { id: uid(), t: nx, g: 'B', m: '', na: '', end: '', r: 'sec', d: false, f: k }; T.tasks.push(n); D.rv.nid = n.id; }
-            save(); render(); toast('\u2705 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f' + (nx ? '\u060c \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc \u0631\u0641\u062a \u0628\u0631\u0627\u06cc \u0641\u0631\u062f\u0627' : ''));
+            if (nx) { var n = { id: uid(), t: nx, g: 'B', m: '', na: '', end: '', tm: '', al: false, r: 'sec', d: false, f: k }; T.tasks.push(n); D.rv.nid = n.id; }
+            save(); render(); toast('\u2705 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f' + (nx ? '\u060c \u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc \u0631\u0641\u062a \u0628\u0631\u0627\u06cc \u0631\u0648\u0632 \u0628\u0639\u062f' : ''));
           }
           function openTmrw() {
-            var k = dk(), D = day(k), l = D.tasks.filter(function (t) { return !t.d && !t.mv && t.g != 'D'; });
+            var k = SEL, l = day(k).tasks.filter(function (t) { return !t.d && !t.mv && t.g != 'D'; });
             l.forEach(function (t) { moveTask(k, t, addD(k, 1)); });
-            save(); render(); toast('\u2705 ' + fa(l.length) + ' \u06a9\u0627\u0631 \u0631\u0641\u062a \u0628\u0631\u0627\u06cc \u0641\u0631\u062f\u0627');
+            save(); render(); toast('\u2705 ' + fa(l.length) + ' \u06a9\u0627\u0631 \u0631\u0641\u062a \u0628\u0631\u0627\u06cc \u0631\u0648\u0632 \u0628\u0639\u062f');
           }
 
-          /* trend */
+          /* ---------- trend ---------- */
+          function cell(t, v) { return '<div style="flex:1;text-align:center;min-width:70px"><div class="mut sm">' + t + '</div><div class="big">' + v + '</div></div>'; }
           function rTrend() {
             var keys = lastKeys(7), r = stats(keys), h = '';
             if (r.n < 5) h += '<div class="box warn">\u0641\u0642\u0637 ' + fa(r.n) + ' \u0631\u0648\u0632 \u062f\u0627\u062f\u0647 \u062f\u0627\u0631\u06cc. \u062a\u0627 \u06f5 \u0631\u0648\u0632 \u0646\u0634\u062f\u0647\u060c \u0627\u06cc\u0646\u200c\u0647\u0627 \u0631\u0648 \u0627\u0644\u06af\u0648 \u062d\u0633\u0627\u0628 \u0646\u06a9\u0646\u061b \u0641\u0642\u0637 \u062b\u0628\u062a \u06a9\u0646.</div>';
             h += '<div class="box"><h3>\u06f7 \u0631\u0648\u0632 \u0627\u062e\u06cc\u0631</h3><div class="row">' +
-              cell('\u0627\u0646\u0631\u0698\u06cc', r.en ? fa(r1(r.e / r.en)) + '/\u06f5' : '\u2014') + cell('\u062e\u0648\u0627\u0628', r.sn ? fa(r1(r.sl / r.sn)) + ' \u0633' : '\u2014') +
-              cell('\u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc', r.mainT ? fa(r.mainD) + '/' + fa(r.mainT) : '\u2014') + cell('\u06a9\u0627\u0631\u0647\u0627\u06cc A', r.aT ? fa(Math.round(r.aD / r.aT * 100)) + '\u066a' : '\u2014') + '</div></div>';
+              cell('\u0627\u0646\u0631\u0698\u06cc', r.en ? fa(r1(r.e / r.en)) + '/\u06f5' : '\u2014') + cell('\u062e\u0648\u0627\u0628', r.sn ? fa(r1(r.sl / r.sn)) + ' \u0633' : '\u2014') + cell('\u0645\u063a\u0627\u0632\u0647', r.shn ? fa(r1(r.shop / r.shn / 60)) + ' \u0633' : '\u2014') + '</div><div class="row">' +
+              cell('\u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc', r.mainT ? fa(r.mainD) + '/' + fa(r.mainT) : '\u2014') + cell('\u06a9\u0627\u0631\u0647\u0627\u06cc A', r.aT ? fa(Math.round(r.aD / r.aT * 100)) + '\u066a' : '\u2014') + cell('\u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a', r.rtT ? fa(Math.round(r.rtD / r.rtT * 100)) + '\u066a' : '\u2014') + '</div></div>';
             if (r.hiS.length >= 2 && r.loS.length >= 2) {
               var a = avg(r.hiS), b = avg(r.loS);
               h += '<div class="box"><h3>\ud83e\uddea \u062e\u0648\u0627\u0628 \u0648 \u0627\u0646\u0631\u0698\u06cc (\u062f\u0627\u062f\u0647 \u062e\u0648\u062f\u062a)</h3><div>\u062e\u0648\u0627\u0628 \u06f7+ \u0633\u0627\u0639\u062a: \u0627\u0646\u0631\u0698\u06cc ' + fa(r1(a)) + ' (' + fa(r.hiS.length) + ' \u0631\u0648\u0632)</div><div>\u062e\u0648\u0627\u0628 \u06a9\u0645\u062a\u0631 \u0627\u0632 \u06f7: \u0627\u0646\u0631\u0698\u06cc ' + fa(r1(b)) + ' (' + fa(r.loS.length) + ' \u0631\u0648\u0632)</div><div class="mut sm">' +
                 (Math.abs(a - b) >= 0.7 ? '\u062a\u0641\u0627\u0648\u062a \u0642\u0627\u0628\u0644\u200c\u062a\u0648\u062c\u0647\u0647\u060c \u0648\u0644\u06cc \u0628\u0627 \u0686\u0646\u062f \u0631\u0648\u0632 \u0647\u0646\u0648\u0632 \u0641\u0631\u0636\u06cc\u0647\u200c\u0633\u062a \u0646\u0647 \u0648\u0627\u0642\u0639\u06cc\u062a.' : '\u0641\u0639\u0644\u0627\u064b \u062a\u0641\u0627\u0648\u062a \u0645\u0639\u0646\u06cc\u200c\u062f\u0627\u0631\u06cc \u062f\u06cc\u062f\u0647 \u0646\u0645\u06cc\u0634\u0647.') + '</div></div>';
             }
             var ob = Object.keys(r.ob).sort(function (x, y) { return r.ob[y] - r.ob[x]; });
-            if (ob.length) {
-              var mx = r.ob[ob[0]];
-              h += '<div class="box"><h3>\u0645\u0648\u0627\u0646\u0639 \u067e\u0631\u062a\u06a9\u0631\u0627\u0631</h3>' + ob.map(function (o) { return '<div class="row"><span>' + o + '</span><span class="mut">' + fa(r.ob[o]) + ' \u0628\u0627\u0631</span></div><div class="bar"><i class="hi" style="width:' + Math.round(r.ob[o] / mx * 100) + '%"></i></div>'; }).join('') + '</div>';
-            }
-            h += '<div class="box"><h3>\u0631\u0648\u0632\u0647\u0627</h3><table><tr><th>\u0631\u0648\u0632</th><th>\u0627\u0646\u0631\u0698\u06cc</th><th>\u062e\u0648\u0627\u0628</th><th>\u2b50</th><th>\u0627\u0646\u062c\u0627\u0645</th><th>\u0627\u0645\u062a\u06cc\u0627\u0632</th></tr>';
+            if (ob.length) { var mx = r.ob[ob[0]]; h += '<div class="box"><h3>\u0645\u0648\u0627\u0646\u0639 \u067e\u0631\u062a\u06a9\u0631\u0627\u0631</h3>' + ob.map(function (o) { return '<div class="row"><span>' + o + '</span><span class="mut">' + fa(r.ob[o]) + ' \u0628\u0627\u0631</span></div><div class="bar"><i class="hi" style="width:' + Math.round(r.ob[o] / mx * 100) + '%"></i></div>'; }).join('') + '</div>'; }
+            h += '<div class="box"><h3>\u0631\u0648\u0632\u0647\u0627</h3><table><tr><th>\u0631\u0648\u0632</th><th>\u0627\u0646\u0631\u0698\u06cc</th><th>\u0645\u063a\u0627\u0632\u0647</th><th>\u2b50</th><th>\u06a9\u0627\u0631\u0647\u0627</th><th>\ud83d\udccc</th><th>\ud83d\udcad</th></tr>';
             keys.forEach(function (k) {
-              var D = peek(k) || newDay(), m = D.tasks.filter(function (t) { return t.r == 'main'; })[0], dn = D.tasks.filter(function (t) { return t.d; }).length;
-              h += '<tr><td>' + jStr(k) + '</td><td>' + (D.e ? fa(D.e) : '\u2014') + '</td><td>' + (num(D.sl) ? fa(num(D.sl)) : '\u2014') + '</td><td>' + (m ? (m.d ? '\u2705' : '\u274c') : '\u2014') + '</td><td>' + (D.tasks.length ? fa(dn) + '/' + fa(D.tasks.length) : '\u2014') + '</td><td>' + (D.rv && D.rv.sc ? fa(D.rv.sc) : '\u2014') + '</td></tr>';
+              var D = peek(k) || newDay(), m = D.tasks.filter(function (t) { return t.r == 'main'; })[0], dn = D.tasks.filter(function (t) { return t.d; }).length, rts = rtFor(k), rd = rts.filter(function (x) { return D.rt[x.key]; }).length, md = mdDay(k);
+              var neg = md.filter(function (x) { return moodOf(x.k)[3] < 0; }).length;
+              h += '<tr onclick="SEL=\'' + k + '\';go(\'today\')"><td>' + jStr(k) + '</td><td>' + (D.e ? fa(D.e) : '\u2014') + '</td><td>' + (D.sh.length ? fa(r1(shopM(D) / 60)) : '\u2014') + '</td><td>' + (m ? (m.d ? '\u2705' : '\u274c') : '\u2014') + '</td><td>' + (D.tasks.length ? fa(dn) + '/' + fa(D.tasks.length) : '\u2014') + '</td><td>' + (S.days[k] && rts.length ? fa(rd) + '/' + fa(rts.length) : '\u2014') + '</td><td>' + (md.length ? fa(md.length) + (neg ? '<span style="color:#B48CFF">(' + fa(neg) + '\u2212)</span>' : '') : '\u2014') + '</td></tr>';
             });
-            h += '</table></div>';
-            return h;
+            return h + '</table><div class="mut sm">\u0631\u0648\u06cc \u0647\u0631 \u0631\u0648\u0632 \u0628\u0632\u0646\u06cc\u060c \u0628\u0627\u0632\u0634 \u0645\u06cc\u200c\u06a9\u0646\u0647.</div></div>';
           }
-          function cell(t, v) { return '<div style="flex:1;text-align:center;min-width:70px"><div class="mut sm">' + t + '</div><div class="big">' + v + '</div></div>'; }
 
-          /* ai */
+          /* ---------- ai ---------- */
           function rAi() {
-            var D = day(dk()), h = '<div class="box"><div class="mut">\u062f\u0627\u062f\u0647\u200c\u0647\u0627 + \u067e\u0631\u0627\u0645\u067e\u062a \u0627\u0635\u0644\u06cc \u06a9\u067e\u06cc \u0645\u06cc\u0634\u0647. \u062a\u0648 \u0686\u062a ClickUp Brain (\u06cc\u0627 \u0647\u0631 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc) \u067e\u06cc\u0633\u062a \u06a9\u0646. \u0628\u062f\u0648\u0646 \u06a9\u0644\u06cc\u062f API \u0648 \u0628\u062f\u0648\u0646 \u0647\u0632\u06cc\u0646\u0647.</div></div><div class="box">';
+            var D = day(SEL), h = '<div class="box"><div class="mut">\u062f\u0627\u062f\u0647\u200c\u0647\u0627 + \u067e\u0631\u0627\u0645\u067e\u062a \u0627\u0635\u0644\u06cc \u06a9\u067e\u06cc \u0645\u06cc\u0634\u0647. \u062a\u0648 \u0686\u062a ClickUp Brain \u067e\u06cc\u0633\u062a \u06a9\u0646. \u0628\u062f\u0648\u0646 \u06a9\u0644\u06cc\u062f API \u0648 \u0628\u062f\u0648\u0646 \u0647\u0632\u06cc\u0646\u0647. \u062d\u0627\u0644\u062a\u200c\u0647\u0627\u06cc \u0631\u0648\u0632\u0627\u0646\u0647 \u0628\u0631\u0627\u06cc \u0631\u0648\u0632 \u0627\u0646\u062a\u062e\u0627\u0628\u200c\u0634\u062f\u0647\u200c\u0627\u0646 (' + jStr(SEL) + ').</div></div><div class="box">';
             Object.keys(MODES).forEach(function (m) { h += '<button class="btn w" onclick="cp(\'' + m + '\')">\ud83d\udccb \u06a9\u067e\u06cc: ' + MODES[m][0] + '</button>'; });
-            h += '<button class="btn g w" onclick="preview()">\ud83d\udc41 \u067e\u06cc\u0634\u200c\u0646\u0645\u0627\u06cc\u0634 \u0645\u062a\u0646 \u0635\u0628\u062d</button><div id="pv"></div></div>';
-            h += '<div class="box"><label>\u062c\u0648\u0627\u0628 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u0631\u0648 \u0627\u06cc\u0646\u062c\u0627 \u0646\u06af\u0647 \u062f\u0627\u0631 (\u0628\u0631\u0627\u06cc \u0627\u0645\u0631\u0648\u0632)</label><textarea id="aiT" style="min-height:120px">' + esc(D.ai) + '</textarea><button class="btn" onclick="saveAi()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="pasteAi()">\ud83d\udce5 \u0686\u0633\u0628\u0627\u0646\u062f\u0646</button></div>';
+            h += '<button class="btn g w" onclick="preview()">\ud83d\udc41 \u067e\u06cc\u0634\u200c\u0646\u0645\u0627\u06cc\u0634 \u0645\u062a\u0646 \u0647\u0641\u062a\u06af\u06cc</button><div id="pv"></div></div>';
+            h += '<div class="box"><label>\u062c\u0648\u0627\u0628 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc \u0631\u0648 \u0627\u06cc\u0646\u062c\u0627 \u0646\u06af\u0647 \u062f\u0627\u0631 (\u0628\u0631\u0627\u06cc ' + jStr(SEL) + ')</label><textarea id="aiT" style="min-height:120px">' + esc(D.ai) + '</textarea><button class="btn" onclick="saveAi()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="pasteAi()">\ud83d\udce5 \u0686\u0633\u0628\u0627\u0646\u062f\u0646</button></div>';
             return h;
           }
           function setClip(t) { try { Android.setClip(t); return true; } catch (e) { try { navigator.clipboard.writeText(t); return true; } catch (e2) { return false; } } }
           function cp(m) { var t = buildPrompt(m); toast(setClip(t) ? '\u2705 \u06a9\u067e\u06cc \u0634\u062f (' + fa(t.length) + ' \u062d\u0631\u0641). \u062d\u0627\u0644\u0627 \u062a\u0648 \u0686\u062a \u067e\u06cc\u0633\u062a \u06a9\u0646' : '\u06a9\u067e\u06cc \u0646\u0634\u062f'); }
-          function preview() { $('pv').innerHTML = '<textarea style="min-height:240px;font-size:12px" readonly>' + esc(buildPrompt('morning')) + '</textarea>'; }
-          function saveAi() { day(dk()).ai = $('aiT').value; save(); toast('\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f'); }
+          function preview() { $('pv').innerHTML = '<textarea style="min-height:240px;font-size:12px" readonly>' + esc(buildPrompt('week')) + '</textarea>'; }
+          function saveAi() { day(SEL).ai = $('aiT').value; save(); toast('\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f'); }
           function pasteAi() { var t = ''; try { t = Android.clip(); } catch (e) {} if (!t) { toast('\u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u062e\u0627\u0644\u06cc\u0647'); return; } $('aiT').value = t; saveAi(); }
 
-          /* settings */
+          /* ---------- settings ---------- */
           function rSet() {
             var s = S.set;
-            return '<div class="box"><h3>\ud83d\udd14 \u06cc\u0627\u062f\u0622\u0648\u0631 \u0631\u0648\u0632\u0627\u0646\u0647</h3><label><input type="checkbox" style="width:auto" ' + (s.rem ? 'checked' : '') + ' onchange="S.set.rem=this.checked;save();remind();render()"> \u0631\u0648\u0634\u0646</label>' +
-              '<div class="row"><div style="flex:1"><label>\u0635\u0628\u062d</label><input type="time" value="' + s.mt + '" onchange="S.set.mt=this.value;save();remind()"></div><div style="flex:1"><label>\u0634\u0628</label><input type="time" value="' + s.nt + '" onchange="S.set.nt=this.value;save();remind()"></div></div>' +
-              '<div class="mut sm">\u0628\u0639\u062f \u0627\u0632 \u0631\u06cc\u0633\u062a\u0627\u0631\u062a \u06af\u0648\u0634\u06cc\u060c \u06cc\u0647 \u0628\u0627\u0631 \u0627\u067e \u0631\u0648 \u0628\u0627\u0632 \u06a9\u0646 \u062a\u0627 \u06cc\u0627\u062f\u0622\u0648\u0631\u0647\u0627 \u062f\u0648\u0628\u0627\u0631\u0647 \u062a\u0646\u0638\u06cc\u0645 \u0628\u0634\u0646.</div><button class="btn g s" onclick="testN()">\ud83e\uddea \u0646\u0648\u062a\u06cc\u0641 \u0622\u0632\u0645\u0627\u06cc\u0634\u06cc (\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u0628\u0639\u062f)</button></div>' +
-              '<div class="box"><h3>\ud83d\udd53 \u0634\u0631\u0648\u0639 \u0631\u0648\u0632</h3><label>\u062a\u0627 \u0633\u0627\u0639\u062a \u0686\u0646\u062f \u0628\u0627\u0645\u062f\u0627\u062f \u0647\u0646\u0648\u0632 \u00ab\u062f\u06cc\u0631\u0648\u0632\u00bb \u062d\u0633\u0627\u0628 \u0628\u0634\u0647\u061f</label><input inputmode="numeric" value="' + fa(s.ds) + '" onchange="S.set.ds=Math.max(0,Math.min(8,Math.round(num(this.value))));save();render()"><div class="mut sm">\u0645\u062b\u0644\u0627\u064b \u06f4: \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0633\u0627\u0639\u062a \u06f1 \u0634\u0628 \u0647\u0646\u0648\u0632 \u0645\u0627\u0644 \u0627\u0645\u0631\u0648\u0632\u0647.</div></div>' +
-              '<div class="box"><h3>\ud83e\udde0 \u067e\u0631\u0627\u0645\u067e\u062a \u0627\u0635\u0644\u06cc</h3><div class="mut sm">\u062e\u0627\u0644\u06cc \u0628\u0630\u0627\u0631\u06cc\u060c \u0646\u0633\u062e\u0647 \u062e\u0644\u0627\u0635\u0647 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 \u0627\u0633\u062a\u0641\u0627\u062f\u0647 \u0645\u06cc\u0634\u0647. \u0645\u06cc\u200c\u062a\u0648\u0646\u06cc \u067e\u0631\u0627\u0645\u067e\u062a \u06a9\u0627\u0645\u0644\u062a \u0631\u0648 \u0627\u06cc\u0646\u062c\u0627 \u0628\u0630\u0627\u0631\u06cc.</div><textarea id="spT" style="min-height:140px;font-size:12px">' + esc(s.sp || DEF_PROMPT) + '</textarea><button class="btn s" onclick="saveSp()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g s" onclick="S.set.sp=\'\';save();render();toast(\'\u067e\u06cc\u0634\u200c\u0641\u0631\u0636 \u0628\u0631\u06af\u0634\u062a\')">\u21a9\ufe0f \u067e\u06cc\u0634\u200c\u0641\u0631\u0636</button></div>' +
-              '<div class="box"><h3>\ud83d\udcbe \u067e\u0634\u062a\u06cc\u0628\u0627\u0646</h3><div class="mut sm">\u06a9\u0644 \u062f\u0627\u062f\u0647\u200c\u0647\u0627 \u06a9\u067e\u06cc \u0645\u06cc\u0634\u0647. \u06cc\u0647 \u062c\u0627\u06cc \u0627\u0645\u0646 \u0646\u06af\u0647\u0634 \u062f\u0627\u0631 (\u0645\u062b\u0644\u0627\u064b \u06cc\u0647 \u062a\u0633\u06a9 ClickUp).</div><button class="btn s" onclick="backup()">\ud83d\udccb \u06a9\u067e\u06cc \u067e\u0634\u062a\u06cc\u0628\u0627\u0646</button> <button class="btn g s" onclick="restore()">\ud83d\udce5 \u0628\u0627\u0632\u06cc\u0627\u0628\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f</button></div>' +
+            return '<div class="box"><h3>\ud83d\udd14 \u06cc\u0627\u062f\u0622\u0648\u0631 \u0631\u0648\u0632\u0627\u0646\u0647</h3><label><input type="checkbox" ' + (s.rem ? 'checked' : '') + ' onchange="S.set.rem=this.checked;save()"> \u06cc\u0627\u062f\u0622\u0648\u0631 \u0628\u0631\u0646\u0627\u0645\u0647 \u0635\u0628\u062d \u0648 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0634\u0628</label>' +
+              '<div class="row"><div class="f1"><label>\u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc</label><input type="time" value="' + s.mt + '" onchange="S.set.mt=this.value;save()"></div><div class="f1"><label>\u0628\u0627\u0632\u0628\u06cc\u0646\u06cc</label><input type="time" value="' + s.nt + '" onchange="S.set.nt=this.value;save()"></div></div>' +
+              '<div class="mut sm">\u0622\u0644\u0627\u0631\u0645 \u06a9\u0627\u0631\u0647\u0627 \u0648 \u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a \u0647\u0645 \u062e\u0648\u062f\u06a9\u0627\u0631 \u062a\u0646\u0638\u06cc\u0645 \u0645\u06cc\u0634\u0646\u060c \u062d\u062a\u06cc \u0628\u0639\u062f \u0627\u0632 \u0631\u06cc\u0633\u062a\u0627\u0631\u062a \u06af\u0648\u0634\u06cc.</div><button class="btn g s" onclick="testN()">\ud83e\uddea \u0646\u0648\u062a\u06cc\u0641 \u0622\u0632\u0645\u0627\u06cc\u0634\u06cc (\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u0628\u0639\u062f)</button></div>' +
+              '<div class="box"><h3>\ud83d\udd53 \u0631\u0648\u0632 \u0645\u0646</h3><div class="row"><div class="f1"><label>\u0628\u06cc\u062f\u0627\u0631\u06cc \u0645\u0639\u0645\u0648\u0644</label><input type="time" value="' + s.wk + '" onchange="S.set.wk=this.value;save()"></div><div class="f1"><label>\u062e\u0648\u0627\u0628 \u0645\u0639\u0645\u0648\u0644</label><input type="time" value="' + s.bt + '" onchange="S.set.bt=this.value;save()"></div></div>' +
+              '<label>\u0631\u0648\u0632 \u062a\u0627 \u0633\u0627\u0639\u062a \u0686\u0646\u062f \u0628\u0627\u0645\u062f\u0627\u062f \u0627\u062f\u0627\u0645\u0647 \u062f\u0627\u0631\u0647\u061f</label><input inputmode="numeric" value="' + fa(s.ds) + '" onchange="S.set.ds=Math.max(0,Math.min(10,Math.round(num(this.value))));save();SEL=dk();render()">' +
+              '<div class="mut sm">\u0645\u062b\u0644\u0627\u064b \u06f4: \u06a9\u0627\u0631\u0647\u0627\u06cc \u0633\u0627\u0639\u062a \u06f1 \u0648 \u06f3 \u0628\u0627\u0645\u062f\u0627\u062f \u062c\u0632\u0648 \u0647\u0645\u0648\u0646 \u0631\u0648\u0632\u0646 \u0648 \u062a\u0631\u062a\u06cc\u0628\u0634\u0648\u0646 \u0628\u0639\u062f \u0627\u0632 \u06f2\u06f3 \u0645\u06cc\u0627\u062f.</div></div>' +
+              rRtEdit() +
+              '<div class="box"><h3>\ud83e\udde0 \u067e\u0631\u0627\u0645\u067e\u062a \u0627\u0635\u0644\u06cc</h3><div class="mut sm">\u062e\u0627\u0644\u06cc \u06cc\u0627 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 = \u0646\u0633\u062e\u0647 \u062e\u0644\u0627\u0635\u0647. \u0645\u06cc\u200c\u062a\u0648\u0646\u06cc \u067e\u0631\u0627\u0645\u067e\u062a \u06a9\u0627\u0645\u0644\u062a \u0631\u0648 \u0627\u06cc\u0646\u062c\u0627 \u0628\u0630\u0627\u0631\u06cc.</div><textarea id="spT" style="min-height:140px;font-size:12px">' + esc(s.sp || DEF_PROMPT) + '</textarea><button class="btn s" onclick="saveSp()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g s" onclick="S.set.sp=\'\';save();render();toast(\'\u067e\u06cc\u0634\u200c\u0641\u0631\u0636 \u0628\u0631\u06af\u0634\u062a\')">\u21a9\ufe0f \u067e\u06cc\u0634\u200c\u0641\u0631\u0636</button></div>' +
+              '<div class="box"><h3>\ud83d\udcbe \u062d\u0641\u0638 \u062f\u0627\u062f\u0647\u200c\u0647\u0627</h3><div class="mut sm">\u062f\u0627\u062f\u0647\u200c\u0647\u0627 \u0631\u0648\u06cc \u06af\u0648\u0634\u06cc \u0645\u06cc\u200c\u0645\u0648\u0646\u0646 \u0648 \u0628\u0627 \u0622\u067e\u062f\u06cc\u062a \u067e\u0627\u06a9 \u0646\u0645\u06cc\u0634\u0646 (\u0627\u0645\u0636\u0627\u06cc \u062b\u0627\u0628\u062a). \u0648\u0644\u06cc \u0627\u06af\u0647 \u0627\u067e \u067e\u0627\u06a9 \u0628\u0634\u0647 \u06cc\u0627 \u06af\u0648\u0634\u06cc \u0639\u0648\u0636 \u0628\u0634\u0647\u060c \u0641\u0642\u0637 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0646\u062c\u0627\u062a\u062a \u0645\u06cc\u062f\u0647. \u0647\u0641\u062a\u0647\u200c\u0627\u06cc \u06cc\u0647 \u0628\u0627\u0631 \u0628\u0641\u0631\u0633\u062a\u0634 \u062a\u0648 ClickUp \u06cc\u0627 \u062a\u0644\u06af\u0631\u0627\u0645.' + (s.lb ? '<br>\u0622\u062e\u0631\u06cc\u0646 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646: ' + jStr(dk(s.lb)) : '') + '</div>' +
+              '<button class="btn s" onclick="shareB()">\ud83d\udce4 \u0627\u0631\u0633\u0627\u0644 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646</button> <button class="btn g s" onclick="backup()">\ud83d\udccb \u06a9\u067e\u06cc</button> <button class="btn g s" onclick="restore()">\ud83d\udce5 \u0628\u0627\u0632\u06cc\u0627\u0628\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f</button> <button class="btn g s" onclick="restoreSnap()">\u23ea \u0646\u0633\u062e\u0647 \u062e\u0648\u062f\u06a9\u0627\u0631 \u062f\u06cc\u0631\u0648\u0632</button></div>' +
               '<div class="box"><h3>\ud83c\udd95 \u0622\u067e\u062f\u06cc\u062a</h3><div class="mut">\u0646\u0633\u062e\u0647 \u0641\u0639\u0644\u06cc: v' + fa(BUILD) + '</div><button class="btn s" onclick="checkUpdate(true)">\u0628\u0631\u0631\u0633\u06cc \u0622\u067e\u062f\u06cc\u062a</button></div>' +
               '<div class="box"><button class="btn r s" onclick="resetAll()">\ud83d\uddd1 \u067e\u0627\u06a9 \u06a9\u0631\u062f\u0646 \u0647\u0645\u0647 \u062f\u0627\u062f\u0647\u200c\u0647\u0627</button></div>';
           }
+          function rRtEdit() {
+            var h = '<div class="box" id="rtbox"><div class="row"><h3>\ud83d\udccc \u06a9\u0627\u0631\u0647\u0627\u06cc \u062b\u0627\u0628\u062a</h3><button class="btn s" onclick="reOpen(null)">\u2795 \u06a9\u0627\u0631 \u062b\u0627\u0628\u062a</button></div><div class="mut sm">\u06a9\u0627\u0631\u0647\u0627\u06cc\u06cc \u06a9\u0647 \u0647\u0631 \u0631\u0648\u0632 \u062a\u06a9\u0631\u0627\u0631 \u0645\u06cc\u0634\u0646. \u0647\u0631 \u06a9\u062f\u0648\u0645 \u0645\u06cc\u200c\u062a\u0648\u0646\u0647 \u0686\u0646\u062f \u0646\u0648\u0628\u062a \u0628\u0627 \u0633\u0627\u0639\u062a\u200c\u0647\u0627\u06cc \u0645\u062e\u062a\u0644\u0641 \u062f\u0627\u0634\u062a\u0647 \u0628\u0627\u0634\u0647.</div>';
+            if (RE && !RE.id) h += reForm();
+            S.rt.forEach(function (r) {
+              if (RE && RE.id == r.id) { h += reForm(); return; }
+              h += '<div class="task" onclick="reOpen(\'' + r.id + '\')"><b>' + esc(r.n) + '</b>' + (r.al ? ' \ud83d\udd14' : '') + '<div class="mut sm">' + r.tms.map(function (t) { return '<span class="tm">' + fa(t) + '</span>'; }).join(' ') + ' \u00b7 ' + fa(num(r.m) || 0) + ' \u062f\u0642\u06cc\u0642\u0647 \u00b7 ' + (r.dw && r.dw.length ? WORD.filter(function (w) { return r.dw.indexOf(w) >= 0; }).map(function (w) { return WD[w]; }).join('\u060c ') : '\u0647\u0631 \u0631\u0648\u0632') + '</div></div>';
+            });
+            return h + '</div>';
+          }
+          function reOpen(id) {
+            var r = null; S.rt.forEach(function (x) { if (x.id == id) r = x; });
+            RE = r ? JSON.parse(JSON.stringify(r)) : { id: '', n: '', tms: ['08:00'], m: 5, al: false, dw: [] };
+            render(); var b = $('rtbox'); if (b) b.scrollIntoView();
+          }
+          function reForm() {
+            var h = '<div class="box inn"><label>\u0627\u0633\u0645 (\u0645\u06cc\u200c\u062a\u0648\u0646\u06cc \u0627\u06cc\u0645\u0648\u062c\u06cc \u0647\u0645 \u0628\u0630\u0627\u0631\u06cc)</label><input id="reN" value="' + esc(RE.n) + '" placeholder="\u0645\u062b\u0644\u0627\u064b \ud83d\udc8a \u0642\u0631\u0635">' +
+              '<label>\u0646\u0648\u0628\u062a\u200c\u0647\u0627 \u0648 \u0633\u0627\u0639\u062a\u200c\u0647\u0627</label>';
+            RE.tms.forEach(function (t, i) { h += '<div class="row" style="flex-wrap:nowrap"><span class="sm">' + fa(i + 1) + '</span><input type="time" id="reT' + i + '" value="' + esc(t) + '" style="flex:1">' + (RE.tms.length > 1 ? '<span class="chip" onclick="reDelT(' + i + ')">\u2715</span>' : '') + '</div>'; });
+            h += '<button class="btn g s" onclick="reAddT()">\u2795 \u0646\u0648\u0628\u062a \u062f\u06cc\u06af\u0647</button>' +
+              '<label><br>\u0645\u062f\u062a \u0647\u0631 \u0646\u0648\u0628\u062a (\u062f\u0642\u06cc\u0642\u0647)</label><input id="reM" inputmode="numeric" value="' + esc(RE.m) + '">' +
+              '<label><input type="checkbox" id="reAl" ' + (RE.al ? 'checked' : '') + '> \ud83d\udd14 \u0622\u0644\u0627\u0631\u0645 \u0633\u0631 \u0647\u0631 \u0646\u0648\u0628\u062a</label>' +
+              '<label><br><br>\u0631\u0648\u0632\u0647\u0627 (\u0647\u06cc\u0686\u200c\u06a9\u062f\u0648\u0645 = \u0647\u0631 \u0631\u0648\u0632)</label><div class="chips">' + WORD.map(function (w) { return '<span class="chip' + (RE.dw.indexOf(w) >= 0 ? ' on' : '') + '" onclick="reDw(' + w + ')">' + WD[w] + '</span>'; }).join('') + '</div>' +
+              '<button class="btn" onclick="reSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="RE=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' + (RE.id ? ' <button class="btn r" onclick="reDel()">\ud83d\uddd1 \u062d\u0630\u0641</button>' : '') + '</div>';
+            return h;
+          }
+          function reGrab() {
+            if (!$('reN')) return;
+            RE.n = $('reN').value; RE.m = $('reM').value; RE.al = $('reAl').checked;
+            for (var i = 0; i < RE.tms.length; i++) { var el = $('reT' + i); if (el) RE.tms[i] = el.value; }
+          }
+          function reAddT() { reGrab(); RE.tms.push(RE.tms.length ? RE.tms[RE.tms.length - 1] : '12:00'); render(); }
+          function reDelT(i) { reGrab(); RE.tms.splice(i, 1); render(); }
+          function reDw(w) { reGrab(); var p = RE.dw.indexOf(w); if (p >= 0) RE.dw.splice(p, 1); else RE.dw.push(w); render(); }
+          function reSave() {
+            reGrab();
+            RE.n = trim(RE.n); if (!RE.n) { toast('\u0627\u0633\u0645 \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
+            RE.tms = RE.tms.filter(function (t) { return hm2m(t) >= 0; });
+            if (!RE.tms.length) { toast('\u062d\u062f\u0627\u0642\u0644 \u06cc\u0647 \u0633\u0627\u0639\u062a \u0628\u0630\u0627\u0631'); return; }
+            RE.tms.sort(function (a, b) { return tmin(a) - tmin(b); });
+            RE.m = num(RE.m) || 0;
+            if (!RE.id) { RE.id = 'r' + uid(); S.rt.push(RE); }
+            else for (var i = 0; i < S.rt.length; i++) if (S.rt[i].id == RE.id) S.rt[i] = RE;
+            RE = null; save(); render(); toast('\u2705 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f');
+          }
+          function reDel() { if (!confirm('\u00ab' + RE.n + '\u00bb \u0627\u0632 \u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a \u062d\u0630\u0641 \u0628\u0634\u0647\u061f')) return; var id = RE.id; S.rt = S.rt.filter(function (r) { return r.id != id; }); RE = null; save(); render(); }
           function saveSp() { var v = $('spT').value; S.set.sp = v == DEF_PROMPT ? '' : v; save(); toast('\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f'); }
-          function backup() { var t = 'LIFE1:' + JSON.stringify(S); toast(setClip(t) ? '\u2705 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u06a9\u067e\u06cc \u0634\u062f (' + fa(Object.keys(S.days).length) + ' \u0631\u0648\u0632)' : '\u06a9\u067e\u06cc \u0646\u0634\u062f'); }
+          function bText() { return 'LIFE1:' + JSON.stringify(S); }
+          function backup() { S.set.lb = Date.now(); save(); toast(setClip(bText()) ? '\u2705 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u06a9\u067e\u06cc \u0634\u062f (' + fa(Object.keys(S.days).length) + ' \u0631\u0648\u0632)' : '\u06a9\u067e\u06cc \u0646\u0634\u062f'); }
+          function shareB() { S.set.lb = Date.now(); save(); try { Android.share(bText()); } catch (e) { backup(); } render(); }
+          function loadB(o) { S = o; fixS(); save(); render(); }
           function restore() {
             var t = ''; try { t = Android.clip(); } catch (e) {}
-            t = String(t || '').replace(/^\s+|\s+$/g, '');
+            t = trim(t);
             if (t.indexOf('LIFE1:') != 0) { toast('\u0645\u062a\u0646 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u062a\u0648 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u0646\u06cc\u0633\u062a'); return; }
-            try { var o = JSON.parse(t.substring(6)); if (!o.days) throw 1; if (!confirm('\u062f\u0627\u062f\u0647\u200c\u0647\u0627\u06cc \u0641\u0639\u0644\u06cc \u0628\u0627 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 (' + fa(Object.keys(o.days).length) + ' \u0631\u0648\u0632) \u062c\u0627\u06cc\u06af\u0632\u06cc\u0646 \u0628\u0634\u0647\u061f')) return; S = o; if (!S.set) S.set = {}; save(); remind(); render(); toast('\u2705 \u0628\u0627\u0632\u06cc\u0627\u0628\u06cc \u0634\u062f'); } catch (e) { toast('\u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u062e\u0631\u0627\u0628\u0647'); }
+            try { var o = JSON.parse(t.substring(6)); if (!o.days) throw 1; if (!confirm('\u062f\u0627\u062f\u0647\u200c\u0647\u0627\u06cc \u0641\u0639\u0644\u06cc \u0628\u0627 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 (' + fa(Object.keys(o.days).length) + ' \u0631\u0648\u0632) \u062c\u0627\u06cc\u06af\u0632\u06cc\u0646 \u0628\u0634\u0647\u061f')) return; loadB(o); toast('\u2705 \u0628\u0627\u0632\u06cc\u0627\u0628\u06cc \u0634\u062f'); } catch (e) { toast('\u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u062e\u0631\u0627\u0628\u0647'); }
           }
-          function resetAll() { if (!confirm('\u0647\u0645\u0647 \u0631\u0648\u0632\u0647\u0627 \u0648 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f \u0628\u0631\u06af\u0634\u062a \u0646\u062f\u0627\u0631\u0647.')) return; if (!confirm('\u0645\u0637\u0645\u0626\u0646\u06cc\u061f \u0627\u0648\u0644 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0628\u06af\u06cc\u0631.')) return; S = { v: 1, days: {}, set: S.set }; save(); go('today'); }
+          function restoreSnap() {
+            var o = ld('life1_bak', null);
+            if (!o || !o.days) { toast('\u0646\u0633\u062e\u0647 \u062e\u0648\u062f\u06a9\u0627\u0631\u06cc \u0646\u06cc\u0633\u062a'); return; }
+            if (!confirm('\u0628\u0631\u06af\u0631\u062f\u0647 \u0628\u0647 \u0646\u0633\u062e\u0647 \u062e\u0648\u062f\u06a9\u0627\u0631 ' + jStr(o.sk || dk()) + '\u061f \u062a\u063a\u06cc\u06cc\u0631\u0627\u062a \u0628\u0639\u062f \u0627\u0632 \u0627\u0648\u0646 \u067e\u0627\u06a9 \u0645\u06cc\u0634\u0646.')) return;
+            delete o.sk; loadB(o); toast('\u2705 \u0628\u0631\u06af\u0634\u062a');
+          }
+          function snap() { var k = dk(); if (ld('life1_bk', '') != k) { var o = JSON.parse(JSON.stringify(S)); o.sk = k; sv('life1_bak', o); sv('life1_bk', k); } }
+          function resetAll() { if (!confirm('\u0647\u0645\u0647 \u0631\u0648\u0632\u0647\u0627\u060c \u0627\u062d\u0648\u0627\u0644 \u0648 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f \u0628\u0631\u06af\u0634\u062a \u0646\u062f\u0627\u0631\u0647.')) return; if (!confirm('\u0645\u0637\u0645\u0626\u0646\u06cc\u061f \u0627\u0648\u0644 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0628\u06af\u06cc\u0631.')) return; S = { v: 2, days: {}, set: S.set, rt: S.rt }; fixS(); save(); go('today'); }
 
-          /* reminders */
-          function alarmAt(dayOffset, hm) { var p = String(hm || '08:00').split(':'), d = new Date(); d.setDate(d.getDate() + dayOffset); d.setHours(+p[0] || 0, +p[1] || 0, 0, 0); return d.getTime(); }
+          /* ---------- alarms ---------- */
+          function want() {
+            var w = {}, now = Date.now(), k0 = dk();
+            function add(id, t, a, b) { if (t > now + 5000) w[id] = [t, a, b]; }
+            for (var i = 0; i < 8; i++) (function (k, i) {
+              if (S.set.rem && i < 7) { add('m' + k, tsOf(k, S.set.mt), '\u2600\ufe0f \u0628\u0631\u0646\u0627\u0645\u0647 \u0631\u0648\u0632', '\u0627\u0646\u0631\u0698\u06cc\u060c \u0646\u0648\u0628\u062a\u200c\u0647\u0627\u06cc \u0645\u063a\u0627\u0632\u0647 \u0648 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc \u0631\u0648 \u062b\u0628\u062a \u06a9\u0646'); add('n' + k, tsOf(k, S.set.nt), '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0631\u0648\u0632', '\u0686\u06cc \u0627\u0646\u062c\u0627\u0645 \u0634\u062f\u061f \u0686\u06cc \u0645\u0627\u0646\u0639 \u0634\u062f\u061f \u06cc\u0647 \u062d\u0633 \u0647\u0645 \u062b\u0628\u062a \u06a9\u0646'); }
+              var D = peek(k);
+              if (D) {
+                D.tasks.forEach(function (t) { if (t.al && t.tm && !t.d && !t.mv) add('t' + t.id, tsOf(k, t.tm), '\u23f0 ' + t.tm + ' \u00b7 ' + t.t, t.na ? '\u25b6\ufe0f ' + t.na : '\u0648\u0642\u062a\u0634\u0647'); });
+                D.sh.forEach(function (s, j) { if (s.al && s.s) add('s' + k + j, tsOf(k, s.s), '\ud83c\udfea \u0646\u0648\u0628\u062a ' + fa(j + 1) + ' \u0645\u063a\u0627\u0632\u0647', fa(s.s) + ' \u062a\u0627 ' + fa(s.e || '?')); });
+              }
+              if (i < 2) rtFor(k).forEach(function (x) { if (x.r.al && !(D && D.rt[x.key])) add('r' + k + x.key, tsOf(k, x.tm), '\ud83d\udccc ' + x.r.n, '\u0633\u0627\u0639\u062a ' + fa(x.tm) + '\u060c \u0627\u0646\u062c\u0627\u0645\u0634 \u062f\u0627\u062f\u06cc \u062a\u06cc\u06a9 \u0628\u0632\u0646'); });
+            })(addD(k0, i), i);
+            return w;
+          }
           function remind() {
-            for (var i = 0; i < 7; i++) {
-              try {
-                if (!S.set.rem) { Android.cancelAlarm('m' + i); Android.cancelAlarm('n' + i); continue; }
-                Android.alarm('m' + i, String(alarmAt(i, S.set.mt)), '\u2600\ufe0f \u0628\u0631\u0646\u0627\u0645\u0647 \u0627\u0645\u0631\u0648\u0632', '\u0627\u0646\u0631\u0698\u06cc\u060c \u0632\u0645\u0627\u0646 \u0622\u0632\u0627\u062f \u0648 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc \u0631\u0648 \u062b\u0628\u062a \u06a9\u0646 (\u06f1 \u062f\u0642\u06cc\u0642\u0647)');
-                Android.alarm('n' + i, String(alarmAt(i, S.set.nt)), '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0627\u0645\u0631\u0648\u0632', '\u0686\u06cc \u0627\u0646\u062c\u0627\u0645 \u0634\u062f\u061f \u0686\u06cc \u0645\u0627\u0646\u0639 \u0634\u062f\u061f \u0641\u0631\u062f\u0627 \u0686\u06cc \u0639\u0648\u0636 \u0628\u0634\u0647\u061f');
-              } catch (e) {}
-            }
+            var w = want(), old = S.alm || {}, nw = {}, ch = false;
+            Object.keys(old).forEach(function (id) { if (!w[id]) { try { Android.cancelAlarm(id); } catch (e) {} ch = true; } });
+            Object.keys(w).forEach(function (id) {
+              var a = w[id], sig = a[0] + '|' + a[1] + '|' + a[2]; nw[id] = sig;
+              if (old[id] !== sig) { try { Android.alarm(id, String(a[0]), a[1], a[2]); } catch (e) {} ch = true; }
+            });
+            S.alm = nw; if (ch) sv('life1', S);
           }
-          function testN() { try { Android.alarm('test', String(Date.now() + 10000), '\ud83e\uddea \u062a\u0633\u062a', '\u06cc\u0627\u062f\u0622\u0648\u0631\u0647\u0627 \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0646 \u2705'); toast('\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u062f\u06cc\u06af\u0647 \u0646\u0648\u062a\u06cc\u0641 \u0645\u06cc\u0627\u062f'); } catch (e) { toast('\u0641\u0642\u0637 \u062a\u0648 \u0627\u067e \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647'); } }
+          function testN() { try { Android.alarm('test', String(Date.now() + 10000), '\ud83e\uddea \u062a\u0633\u062a', '\u0622\u0644\u0627\u0631\u0645\u200c\u0647\u0627 \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0646 \u2705'); toast('\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u062f\u06cc\u06af\u0647 \u0646\u0648\u062a\u06cc\u0641 \u0645\u06cc\u0627\u062f'); } catch (e) { toast('\u0641\u0642\u0637 \u062a\u0648 \u0627\u067e \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647'); } }
 
-          /* http + update */
+          /* ---------- http + update ---------- */
           var CBS = {}, CBN = 0;
           window.__cb = function (id, s) { var f = CBS[id]; delete CBS[id]; var r = {}; try { r = JSON.parse(s); } catch (e) {} if (f) f(r); };
           function http(url, fn) { var id = 'c' + (++CBN); CBS[id] = fn; try { Android.get(url, id); } catch (e) { delete CBS[id]; fn({ status: 0 }); } }
@@ -859,16 +1273,17 @@ jobs:
           }
           function getUpd() { var u = ld('upd', null); if (!u) return; try { Android.openUrl(u.url); toast('\u0628\u0639\u062f \u0627\u0632 \u062f\u0627\u0646\u0644\u0648\u062f\u060c \u0641\u0627\u06cc\u0644 \u0631\u0648 \u0628\u0627\u0632 \u06a9\u0646 \u0648 \u00ab\u0628\u0647\u200c\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc\u00bb \u0631\u0648 \u0628\u0632\u0646'); } catch (e) { toast('\u0645\u0631\u0648\u0631\u06af\u0631 \u0628\u0627\u0632 \u0646\u0634\u062f'); } }
 
-          /* start */
+          /* ---------- start ---------- */
+          if (!S.v2) { for (var i0 = 0; i0 < 7; i0++) { try { Android.cancelAlarm('m' + i0); Android.cancelAlarm('n' + i0); } catch (e) {} } S.v2 = 1; S.v = 2; sv('life1', S); }
+          snap();
           render();
           remind();
           setTimeout(function () { checkUpdate(false); }, 1500);
           var LASTK = dk();
-          setInterval(function () { if (dk() != LASTK) { LASTK = dk(); RV = null; render(); } }, 60000);
+          setInterval(function () { var k = dk(); if (k != LASTK) { if (SEL == LASTK) SEL = k; LASTK = k; RV = null; snap(); remind(); if (!FORM && !EDIT && !MF && !RE) render(); } }, 60000);
           </script>
           </body>
           </html>
-
           EOF_X
           sed -i "s/__BUILD__/$GITHUB_RUN_NUMBER/g" build.gradle src/main/assets/index.html
           sed -i "s#__REPO__#$GITHUB_REPOSITORY#g" src/main/assets/index.html
