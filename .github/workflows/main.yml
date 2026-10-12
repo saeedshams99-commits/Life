@@ -79,6 +79,22 @@ jobs:
               <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
               <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
               <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+              <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.VIEW" />
+                      <data android:scheme="https" />
+                  </intent>
+              </queries>
               <application android:label="&#x632;&#x646;&#x62f;&#x6af;&#x6cc; &#x645;&#x646;" android:allowBackup="true"
                   android:theme="@android:style/Theme.Material.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
@@ -87,6 +103,9 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <activity android:name=".RingActivity" android:exported="false" android:launchMode="singleTop"
+                      android:excludeFromRecents="true" android:taskAffinity="com.saeed.life.ring" />
+                  <service android:name=".RingService" android:exported="false" android:foregroundServiceType="mediaPlayback" />
                   <receiver android:name=".AlarmReceiver" android:exported="false" />
                   <receiver android:name=".BootReceiver" android:exported="true">
                       <intent-filter>
@@ -102,27 +121,42 @@ jobs:
 
           import android.app.Activity;
           import android.app.AlarmManager;
+          import android.app.NotificationManager;
           import android.content.Intent;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.database.Cursor;
+          import android.media.MediaPlayer;
+          import android.media.MediaRecorder;
           import android.os.Build;
           import android.os.Bundle;
+          import android.provider.ContactsContract;
+          import android.provider.Settings;
           import android.webkit.JavascriptInterface;
           import android.webkit.WebChromeClient;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
           import java.io.ByteArrayOutputStream;
+          import java.io.File;
           import java.io.InputStream;
           import java.net.HttpURLConnection;
           import java.net.URL;
           import java.util.ArrayList;
           import java.util.Iterator;
+          import java.util.List;
+          import org.json.JSONArray;
           import org.json.JSONObject;
 
           public class MainActivity extends Activity {
               WebView web;
               SharedPreferences prefs;
+              MediaRecorder rec;
+              String recId = "";
+              long recT0 = 0;
+              MediaPlayer pl;
+              String pickCb = "";
 
               @Override
               protected void onCreate(Bundle b) {
@@ -160,10 +194,83 @@ jobs:
               @Override
               protected void onResume() {
                   super.onResume();
-                  if (web != null) { web.resumeTimers(); web.onResume(); }
+                  if (web != null) { web.resumeTimers(); web.onResume(); web.evaluateJavascript("window.onResumeApp && onResumeApp()", null); }
               }
 
-              synchronized void alStore(String id, long t, String title, String text) {
+              @Override
+              protected void onActivityResult(int rq, int rs, Intent data) {
+                  super.onActivityResult(rq, rs, data);
+                  if (rq != 7) return;
+                  JSONObject r = new JSONObject();
+                  try {
+                      if (rs == RESULT_OK && data != null && data.getData() != null) {
+                          Cursor c = getContentResolver().query(data.getData(),
+                                  new String[]{ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER}, null, null, null);
+                          if (c != null) {
+                              if (c.moveToFirst()) {
+                                  r.put("n", String.valueOf(c.getString(0)));
+                                  r.put("ph", String.valueOf(c.getString(1)));
+                              }
+                              c.close();
+                          }
+                      }
+                  } catch (Exception e) {
+                  }
+                  jsCb(pickCb, r.toString());
+              }
+
+              void jsCb(String cb, String json) {
+                  final String js = "window.__cb(" + JSONObject.quote(cb) + "," + JSONObject.quote(json) + ")";
+                  runOnUiThread(new Runnable() {
+                      public void run() {
+                          if (web != null) web.evaluateJavascript(js, null);
+                      }
+                  });
+              }
+
+              void jsRun(final String js) {
+                  runOnUiThread(new Runnable() {
+                      public void run() {
+                          if (web != null) web.evaluateJavascript(js, null);
+                      }
+                  });
+              }
+
+              static String sid(String id) {
+                  return id == null ? "" : id.replaceAll("[^A-Za-z0-9_]", "");
+              }
+
+              File vfile(String id) {
+                  return new File(getFilesDir(), "v_" + sid(id) + ".m4a");
+              }
+
+              synchronized long recStopInt() {
+                  if (rec == null) return 0;
+                  long ms = System.currentTimeMillis() - recT0;
+                  try { rec.stop(); } catch (Exception e) { ms = 0; }
+                  try { rec.release(); } catch (Exception e) { }
+                  rec = null;
+                  File tmp = new File(getFilesDir(), "v_" + recId + ".tmp.m4a");
+                  File f = new File(getFilesDir(), "v_" + recId + ".m4a");
+                  if (ms > 300 && tmp.exists()) {
+                      f.delete();
+                      tmp.renameTo(f);
+                  } else {
+                      tmp.delete();
+                      ms = 0;
+                  }
+                  return Math.min(ms, 10000);
+              }
+
+              void stopPl() {
+                  if (pl != null) {
+                      try { pl.stop(); } catch (Exception e) { }
+                      try { pl.release(); } catch (Exception e) { }
+                      pl = null;
+                  }
+              }
+
+              synchronized void alStore(String id, long t, String title, String text, String voice, boolean ring) {
                   try {
                       JSONObject o = new JSONObject(prefs.getString("__al", "{}"));
                       if (t > 0) {
@@ -171,6 +278,8 @@ jobs:
                           a.put("t", t);
                           a.put("ti", title);
                           a.put("tx", text);
+                          a.put("v", voice == null ? "" : voice);
+                          a.put("r", ring);
                           o.put(id, a);
                       } else {
                           o.remove(id);
@@ -199,6 +308,14 @@ jobs:
                   return new String(out.toByteArray(), "UTF-8");
               }
 
+              void startAct(Intent i) {
+                  try {
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      startActivity(i);
+                  } catch (Exception e) {
+                  }
+              }
+
               class Bridge {
                   @JavascriptInterface
                   public String load(String k) {
@@ -216,7 +333,18 @@ jobs:
                           long t = Long.parseLong(when);
                           if (t < System.currentTimeMillis()) return;
                           AlarmReceiver.set(MainActivity.this, id, t, title, text);
-                          alStore(id, t, title, text);
+                          alStore(id, t, title, text, "", false);
+                      } catch (Exception e) {
+                      }
+                  }
+
+                  @JavascriptInterface
+                  public void ring(String id, String when, String title, String text, String voice) {
+                      try {
+                          long t = Long.parseLong(when);
+                          if (t < System.currentTimeMillis()) return;
+                          AlarmReceiver.setRing(MainActivity.this, id, t, title, text, voice, 0);
+                          alStore(id, t, title, text, voice, true);
                       } catch (Exception e) {
                       }
                   }
@@ -226,9 +354,177 @@ jobs:
                       try {
                           AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
                           am.cancel(AlarmReceiver.pi(MainActivity.this, id, "", ""));
-                          alStore(id, 0, "", "");
+                          am.cancel(AlarmReceiver.pi(MainActivity.this, id + "_z", "", ""));
+                          alStore(id, 0, "", "", "", false);
                       } catch (Exception e) {
                       }
+                  }
+
+                  @JavascriptInterface
+                  public String recStart(String id) {
+                      if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission("android.permission.RECORD_AUDIO") != PackageManager.PERMISSION_GRANTED) {
+                          runOnUiThread(new Runnable() {
+                              public void run() {
+                                  requestPermissions(new String[]{"android.permission.RECORD_AUDIO"}, 2);
+                              }
+                          });
+                          return "perm";
+                      }
+                      recStopInt();
+                      stopPl();
+                      try {
+                          String s = sid(id);
+                          File f = new File(getFilesDir(), "v_" + s + ".tmp.m4a");
+                          MediaRecorder r = new MediaRecorder();
+                          r.setAudioSource(MediaRecorder.AudioSource.MIC);
+                          r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+                          r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+                          r.setAudioEncodingBitRate(96000);
+                          r.setAudioSamplingRate(44100);
+                          r.setMaxDuration(10000);
+                          r.setOutputFile(f.getAbsolutePath());
+                          r.setOnInfoListener(new MediaRecorder.OnInfoListener() {
+                              public void onInfo(MediaRecorder mr, int what, int extra) {
+                                  if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
+                                      long ms = recStopInt();
+                                      jsRun("window.recDone && recDone(" + ms + ")");
+                                  }
+                              }
+                          });
+                          r.prepare();
+                          r.start();
+                          rec = r;
+                          recId = s;
+                          recT0 = System.currentTimeMillis();
+                          return "ok";
+                      } catch (Exception e) {
+                          try { if (rec != null) rec.release(); } catch (Exception e2) { }
+                          rec = null;
+                          return "err";
+                      }
+                  }
+
+                  @JavascriptInterface
+                  public String recStop() {
+                      return String.valueOf(recStopInt());
+                  }
+
+                  @JavascriptInterface
+                  public void playVoice(String id) {
+                      stopPl();
+                      try {
+                          File f = vfile(id);
+                          if (!f.exists()) return;
+                          MediaPlayer p = new MediaPlayer();
+                          p.setDataSource(f.getAbsolutePath());
+                          p.prepare();
+                          p.start();
+                          pl = p;
+                      } catch (Exception e) {
+                      }
+                  }
+
+                  @JavascriptInterface
+                  public void stopVoice() {
+                      stopPl();
+                  }
+
+                  @JavascriptInterface
+                  public String hasVoice(String id) {
+                      return vfile(id).exists() ? "1" : "0";
+                  }
+
+                  @JavascriptInterface
+                  public void delVoice(String id) {
+                      try { vfile(id).delete(); } catch (Exception e) { }
+                  }
+
+                  @JavascriptInterface
+                  public void pickContact(String cb) {
+                      pickCb = cb;
+                      runOnUiThread(new Runnable() {
+                          public void run() {
+                              try {
+                                  Intent i = new Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI);
+                                  startActivityForResult(i, 7);
+                              } catch (Exception e) {
+                                  jsCb(pickCb, "{}");
+                              }
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void dial(String num) {
+                      startAct(new Intent(Intent.ACTION_DIAL, android.net.Uri.parse("tel:" + num)));
+                  }
+
+                  @JavascriptInterface
+                  public String openApp(String pkg, String url) {
+                      try {
+                          if (pkg != null && pkg.length() > 0) {
+                              Intent i = getPackageManager().getLaunchIntentForPackage(pkg);
+                              if (i != null) { startAct(i); return "app"; }
+                          }
+                          if (url != null && url.length() > 0) {
+                              startAct(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)));
+                              return "web";
+                          }
+                      } catch (Exception e) {
+                      }
+                      return "";
+                  }
+
+                  @JavascriptInterface
+                  public String apps() {
+                      JSONArray a = new JSONArray();
+                      try {
+                          PackageManager pm = getPackageManager();
+                          Intent m = new Intent(Intent.ACTION_MAIN);
+                          m.addCategory(Intent.CATEGORY_LAUNCHER);
+                          List<ResolveInfo> l = pm.queryIntentActivities(m, 0);
+                          for (ResolveInfo ri : l) {
+                              JSONObject o = new JSONObject();
+                              o.put("n", String.valueOf(ri.loadLabel(pm)));
+                              o.put("p", ri.activityInfo.packageName);
+                              a.put(o);
+                          }
+                      } catch (Exception e) {
+                      }
+                      return a.toString();
+                  }
+
+                  @JavascriptInterface
+                  public String perms() {
+                      JSONObject o = new JSONObject();
+                      try {
+                          boolean fs = true, ex = true, mic = true, nt = true;
+                          if (Build.VERSION.SDK_INT >= 34) {
+                              NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                              fs = nm.canUseFullScreenIntent();
+                          }
+                          if (Build.VERSION.SDK_INT >= 31) {
+                              AlarmManager am = (AlarmManager) getSystemService(ALARM_SERVICE);
+                              ex = am.canScheduleExactAlarms();
+                          }
+                          if (Build.VERSION.SDK_INT >= 23) mic = checkSelfPermission("android.permission.RECORD_AUDIO") == PackageManager.PERMISSION_GRANTED;
+                          if (Build.VERSION.SDK_INT >= 33) nt = checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED;
+                          o.put("fs", fs);
+                          o.put("ex", ex);
+                          o.put("mic", mic);
+                          o.put("nt", nt);
+                      } catch (Exception e) {
+                      }
+                      return o.toString();
+                  }
+
+                  @JavascriptInterface
+                  public void openSet(String what) {
+                      String pk = "package:" + getPackageName();
+                      if ("fs".equals(what) && Build.VERSION.SDK_INT >= 34) startAct(new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, android.net.Uri.parse(pk)));
+                      else if ("ex".equals(what) && Build.VERSION.SDK_INT >= 31) startAct(new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, android.net.Uri.parse(pk)));
+                      else if ("bat".equals(what) && Build.VERSION.SDK_INT >= 23) startAct(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                      else startAct(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse(pk)));
                   }
 
                   @JavascriptInterface
@@ -240,8 +536,7 @@ jobs:
                                   i.setType("text/plain");
                                   i.putExtra(Intent.EXTRA_SUBJECT, "Life backup");
                                   i.putExtra(Intent.EXTRA_TEXT, t);
-                                  Intent ch = Intent.createChooser(i, "Backup");
-                                  startActivity(ch);
+                                  startActivity(Intent.createChooser(i, "Backup"));
                               } catch (Exception e) {
                               }
                           }
@@ -277,12 +572,7 @@ jobs:
 
                   @JavascriptInterface
                   public void openUrl(String url) {
-                      try {
-                          Intent i = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url));
-                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                          startActivity(i);
-                      } catch (Exception e) {
-                      }
+                      startAct(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)));
                   }
 
                   @JavascriptInterface
@@ -307,12 +597,7 @@ jobs:
                                   } catch (Exception ignored) {
                                   }
                               }
-                              final String js = "window.__cb(" + JSONObject.quote(cb) + "," + JSONObject.quote(r.toString()) + ")";
-                              runOnUiThread(new Runnable() {
-                                  public void run() {
-                                      web.evaluateJavascript(js, null);
-                                  }
-                              });
+                              jsCb(cb, r.toString());
                           }
                       }).start();
                   }
@@ -333,50 +618,76 @@ jobs:
           import android.os.Build;
 
           public class AlarmReceiver extends BroadcastReceiver {
-              static PendingIntent pi(Context c, String id, String title, String text) {
-                  Intent i = new Intent(c, AlarmReceiver.class);
-                  i.putExtra("title", title);
-                  i.putExtra("text", text);
-                  i.putExtra("nid", id.hashCode());
+              static int flags() {
                   int fl = PendingIntent.FLAG_UPDATE_CURRENT;
                   if (Build.VERSION.SDK_INT >= 23) fl |= PendingIntent.FLAG_IMMUTABLE;
-                  return PendingIntent.getBroadcast(c, id.hashCode(), i, fl);
+                  return fl;
+              }
+
+              static PendingIntent pi(Context c, String id, String title, String text) {
+                  return pi(c, id, title, text, "", false, 0);
+              }
+
+              static PendingIntent pi(Context c, String id, String title, String text, String voice, boolean ring, int rep) {
+                  Intent i = new Intent(c, AlarmReceiver.class);
+                  i.putExtra("id", id);
+                  i.putExtra("title", title);
+                  i.putExtra("text", text);
+                  i.putExtra("voice", voice == null ? "" : voice);
+                  i.putExtra("ring", ring);
+                  i.putExtra("rep", rep);
+                  i.putExtra("nid", id.hashCode());
+                  return PendingIntent.getBroadcast(c, id.hashCode(), i, flags());
+              }
+
+              static boolean exactOk(AlarmManager am) {
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      try { return am.canScheduleExactAlarms(); } catch (Exception e) { return false; }
+                  }
+                  return true;
+              }
+
+              static void fallback(AlarmManager am, long t, PendingIntent p) {
+                  try {
+                      if (Build.VERSION.SDK_INT >= 23) am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, p);
+                      else am.set(AlarmManager.RTC_WAKEUP, t, p);
+                  } catch (Exception e2) {
+                  }
               }
 
               static void set(Context c, String id, long t, String title, String text) {
                   AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
                   if (am == null) return;
                   PendingIntent p = pi(c, id, title, text);
-                  boolean exact = true;
-                  if (Build.VERSION.SDK_INT >= 31) {
-                      try { exact = am.canScheduleExactAlarms(); } catch (Exception e) { exact = false; }
-                  }
                   try {
-                      if (Build.VERSION.SDK_INT >= 23) {
-                          if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, p);
-                          else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, p);
-                      } else {
-                          am.setExact(AlarmManager.RTC_WAKEUP, t, p);
-                      }
+                      if (!exactOk(am)) fallback(am, t, p);
+                      else if (Build.VERSION.SDK_INT >= 23) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, p);
+                      else am.setExact(AlarmManager.RTC_WAKEUP, t, p);
                   } catch (Exception e) {
-                      try {
-                          if (Build.VERSION.SDK_INT >= 23) am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, p);
-                          else am.set(AlarmManager.RTC_WAKEUP, t, p);
-                      } catch (Exception e2) {
-                      }
+                      fallback(am, t, p);
                   }
               }
 
-              @Override
-              public void onReceive(Context ctx, Intent in) {
-                  String title = in.getStringExtra("title");
-                  String text = in.getStringExtra("text");
-                  int nid = in.getIntExtra("nid", 1);
+              static void setRing(Context c, String id, long t, String title, String text, String voice, int rep) {
+                  AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+                  if (am == null) return;
+                  PendingIntent p = pi(c, id, title, text, voice, true, rep);
+                  try {
+                      if (!exactOk(am)) { fallback(am, t, p); return; }
+                      Intent show = new Intent(c, MainActivity.class);
+                      PendingIntent sp = PendingIntent.getActivity(c, 5, show, flags());
+                      am.setAlarmClock(new AlarmManager.AlarmClockInfo(t, sp), p);
+                  } catch (Exception e) {
+                      fallback(am, t, p);
+                  }
+              }
+
+              static void notify(Context ctx, String title, String text, int nid) {
                   NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
                   if (nm == null) return;
                   Notification.Builder b;
                   if (Build.VERSION.SDK_INT >= 26) {
-                      NotificationChannel ch = new NotificationChannel("alarms", "\u0622\u0644\u0627\u0631\u0645\u200c\u0647\u0627 \u0648 \u06cc\u0627\u062f\u0622\u0648\u0631\u0647\u0627", NotificationManager.IMPORTANCE_HIGH);
+                      NotificationChannel ch = new NotificationChannel("alarms", "\u06cc\u0627\u062f\u0622\u0648\u0631\u0647\u0627", NotificationManager.IMPORTANCE_HIGH);
                       ch.enableVibration(true);
                       nm.createNotificationChannel(ch);
                       b = new Notification.Builder(ctx, "alarms");
@@ -386,9 +697,7 @@ jobs:
                       b.setDefaults(Notification.DEFAULT_ALL);
                   }
                   Intent open = new Intent(ctx, MainActivity.class);
-                  int fl = PendingIntent.FLAG_UPDATE_CURRENT;
-                  if (Build.VERSION.SDK_INT >= 23) fl |= PendingIntent.FLAG_IMMUTABLE;
-                  PendingIntent p = PendingIntent.getActivity(ctx, nid, open, fl);
+                  PendingIntent p = PendingIntent.getActivity(ctx, nid, open, flags());
                   b.setSmallIcon(android.R.drawable.ic_popup_reminder);
                   b.setContentTitle(title);
                   b.setContentText(text);
@@ -396,6 +705,28 @@ jobs:
                   b.setAutoCancel(true);
                   b.setContentIntent(p);
                   nm.notify(nid, b.build());
+              }
+
+              @Override
+              public void onReceive(Context ctx, Intent in) {
+                  String title = in.getStringExtra("title");
+                  String text = in.getStringExtra("text");
+                  int nid = in.getIntExtra("nid", 1);
+                  if (in.getBooleanExtra("ring", false)) {
+                      try {
+                          Intent s = new Intent(ctx, RingService.class);
+                          s.putExtra("id", in.getStringExtra("id"));
+                          s.putExtra("title", title);
+                          s.putExtra("text", text);
+                          s.putExtra("voice", in.getStringExtra("voice"));
+                          s.putExtra("rep", in.getIntExtra("rep", 0));
+                          if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(s);
+                          else ctx.startService(s);
+                          return;
+                      } catch (Exception e) {
+                      }
+                  }
+                  notify(ctx, title, text, nid);
               }
           }
           EOF_X
@@ -422,10 +753,347 @@ jobs:
                           JSONObject a = o.optJSONObject(id);
                           if (a == null) continue;
                           long t = a.optLong("t", 0);
-                          if (t > now) AlarmReceiver.set(c, id, t, a.optString("ti", ""), a.optString("tx", ""));
+                          if (t <= now) continue;
+                          if (a.optBoolean("r", false)) AlarmReceiver.setRing(c, id, t, a.optString("ti", ""), a.optString("tx", ""), a.optString("v", ""), 0);
+                          else AlarmReceiver.set(c, id, t, a.optString("ti", ""), a.optString("tx", ""));
                       }
                   } catch (Exception e) {
                   }
+              }
+          }
+          EOF_X
+          cat > src/main/java/com/saeed/life/RingService.java <<'EOF_X'
+          package com.saeed.life;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.media.AudioAttributes;
+          import android.media.MediaPlayer;
+          import android.media.RingtoneManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.PowerManager;
+          import android.os.VibrationEffect;
+          import android.os.Vibrator;
+          import java.io.File;
+
+          public class RingService extends Service {
+              static final String CH = "ring1";
+              static final int NID = 4242;
+              static final int MAXREP = 6;
+              MediaPlayer mp;
+              Handler h = new Handler(Looper.getMainLooper());
+              PowerManager.WakeLock wl;
+              Vibrator vib;
+              String id = "", title = "", text = "", voice = "";
+              int rep = 0;
+              boolean ringing = false;
+              boolean useFile = false;
+
+              Runnable timeout = new Runnable() {
+                  public void run() {
+                      if (ringing) snooze();
+                      stopAll();
+                  }
+              };
+              Runnable again = new Runnable() {
+                  public void run() {
+                      if (mp != null && ringing) {
+                          try { mp.seekTo(0); mp.start(); } catch (Exception e) { }
+                      }
+                  }
+              };
+
+              @Override
+              public IBinder onBind(Intent i) {
+                  return null;
+              }
+
+              @Override
+              public int onStartCommand(Intent in, int f, int startId) {
+                  if (in == null) { stopSelf(); return START_NOT_STICKY; }
+                  String act = in.getAction();
+                  if ("DISMISS".equals(act)) { ringing = false; stopAll(); return START_NOT_STICKY; }
+                  if ("SNOOZE".equals(act)) { if (ringing) snooze(); ringing = false; stopAll(); return START_NOT_STICKY; }
+                  if (ringing) { snooze(); release(); }
+                  h.removeCallbacks(timeout);
+                  h.removeCallbacks(again);
+                  id = str(in.getStringExtra("id"));
+                  title = str(in.getStringExtra("title"));
+                  text = str(in.getStringExtra("text"));
+                  voice = str(in.getStringExtra("voice"));
+                  rep = in.getIntExtra("rep", 0);
+                  try {
+                      Notification n = build();
+                      if (Build.VERSION.SDK_INT >= 29) startForeground(NID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                      else startForeground(NID, n);
+                  } catch (Exception e) {
+                      AlarmReceiver.notify(this, title, text, id.hashCode());
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  ringing = true;
+                  try {
+                      PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                      if (wl == null) wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "life:ring");
+                      wl.acquire(75000);
+                  } catch (Exception e) {
+                  }
+                  play();
+                  vibrate();
+                  try {
+                      Intent a = new Intent(this, RingActivity.class);
+                      a.putExtra("title", title);
+                      a.putExtra("text", text);
+                      a.putExtra("rep", rep);
+                      a.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
+                      if (RingActivity.cur != null) RingActivity.cur.show(title, text, rep);
+                  } catch (Exception e) {
+                  }
+                  h.postDelayed(timeout, 60000);
+                  return START_NOT_STICKY;
+              }
+
+              static String str(String s) {
+                  return s == null ? "" : s;
+              }
+
+              Notification build() {
+                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel ch = new NotificationChannel(CH, "\u0622\u0644\u0627\u0631\u0645 \u0635\u0648\u062a\u06cc", NotificationManager.IMPORTANCE_HIGH);
+                      ch.setSound(null, null);
+                      ch.enableVibration(false);
+                      ch.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+                      nm.createNotificationChannel(ch);
+                  }
+                  Intent fi = new Intent(this, RingActivity.class);
+                  fi.putExtra("title", title);
+                  fi.putExtra("text", text);
+                  fi.putExtra("rep", rep);
+                  fi.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
+                  PendingIntent fp = PendingIntent.getActivity(this, 77, fi, AlarmReceiver.flags());
+                  PendingIntent dp = PendingIntent.getService(this, 78, new Intent(this, RingService.class).setAction("DISMISS"), AlarmReceiver.flags());
+                  PendingIntent sp = PendingIntent.getService(this, 79, new Intent(this, RingService.class).setAction("SNOOZE"), AlarmReceiver.flags());
+                  Notification.Builder b;
+                  if (Build.VERSION.SDK_INT >= 26) b = new Notification.Builder(this, CH);
+                  else {
+                      b = new Notification.Builder(this);
+                      b.setPriority(Notification.PRIORITY_MAX);
+                  }
+                  b.setSmallIcon(android.R.drawable.ic_lock_idle_alarm);
+                  b.setContentTitle(title);
+                  b.setContentText(text);
+                  b.setOngoing(true);
+                  b.setAutoCancel(false);
+                  b.setCategory(Notification.CATEGORY_ALARM);
+                  b.setVisibility(Notification.VISIBILITY_PUBLIC);
+                  b.setFullScreenIntent(fp, true);
+                  b.setContentIntent(fp);
+                  b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "\u062e\u0627\u0645\u0648\u0634", dp);
+                  b.addAction(android.R.drawable.ic_lock_idle_alarm, "\u06f5 \u062f\u0642\u06cc\u0642\u0647 \u062f\u06cc\u06af\u0647", sp);
+                  return b.build();
+              }
+
+              void play() {
+                  release();
+                  try {
+                      MediaPlayer p = new MediaPlayer();
+                      p.setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build());
+                      File f = voice.length() > 0 ? new File(getFilesDir(), "v_" + MainActivity.sid(voice) + ".m4a") : null;
+                      useFile = f != null && f.exists();
+                      if (useFile) {
+                          p.setDataSource(f.getAbsolutePath());
+                      } else {
+                          Uri u = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
+                          if (u == null) u = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
+                          p.setDataSource(this, u);
+                      }
+                      if (useFile) {
+                          p.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                              public void onCompletion(MediaPlayer m) {
+                                  h.postDelayed(again, 700);
+                              }
+                          });
+                      } else {
+                          p.setLooping(true);
+                      }
+                      p.prepare();
+                      p.start();
+                      mp = p;
+                  } catch (Exception e) {
+                      mp = null;
+                  }
+              }
+
+              void vibrate() {
+                  try {
+                      vib = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                      long[] pat = new long[]{0, 700, 900};
+                      if (vib == null) return;
+                      if (Build.VERSION.SDK_INT >= 26) vib.vibrate(VibrationEffect.createWaveform(pat, 0));
+                      else vib.vibrate(pat, 0);
+                  } catch (Exception e) {
+                  }
+              }
+
+              void snooze() {
+                  if (rep >= MAXREP) return;
+                  String zid = id.endsWith("_z") ? id : id + "_z";
+                  AlarmReceiver.setRing(this, zid, System.currentTimeMillis() + 5 * 60000L, title, text, voice, rep + 1);
+              }
+
+              void release() {
+                  h.removeCallbacks(again);
+                  if (mp != null) {
+                      try { mp.stop(); } catch (Exception e) { }
+                      try { mp.release(); } catch (Exception e) { }
+                      mp = null;
+                  }
+                  if (vib != null) {
+                      try { vib.cancel(); } catch (Exception e) { }
+                  }
+              }
+
+              void stopAll() {
+                  ringing = false;
+                  h.removeCallbacks(timeout);
+                  release();
+                  try { if (wl != null && wl.isHeld()) wl.release(); } catch (Exception e) { }
+                  try { if (RingActivity.cur != null) RingActivity.cur.finish(); } catch (Exception e) { }
+                  try { stopForeground(true); } catch (Exception e) { }
+                  stopSelf();
+              }
+
+              @Override
+              public void onDestroy() {
+                  release();
+                  super.onDestroy();
+              }
+          }
+          EOF_X
+          cat > src/main/java/com/saeed/life/RingActivity.java <<'EOF_X'
+          package com.saeed.life;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          public class RingActivity extends Activity {
+              static RingActivity cur;
+              TextView tTime, tTitle, tText, tRep;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  cur = this;
+                  if (Build.VERSION.SDK_INT >= 27) {
+                      setShowWhenLocked(true);
+                      setTurnScreenOn(true);
+                  }
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                          | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                          | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  l.setGravity(Gravity.CENTER);
+                  l.setBackgroundColor(0xFF0B1A2E);
+                  l.setPadding(48, 48, 48, 48);
+                  tTime = tv(64, Color.WHITE);
+                  tTitle = tv(26, Color.WHITE);
+                  tText = tv(18, 0xFF9FB2C8);
+                  tRep = tv(14, 0xFFE0A040);
+                  l.addView(tTime);
+                  l.addView(tTitle);
+                  l.addView(tText);
+                  l.addView(tRep);
+                  Button d = btn("\u2705 \u062e\u0627\u0645\u0648\u0634 \u06a9\u0646", 0xFF2E9D5F);
+                  d.setOnClickListener(new View.OnClickListener() {
+                      public void onClick(View v) { send("DISMISS"); }
+                  });
+                  Button s = btn("\ud83d\ude34 \u06f5 \u062f\u0642\u06cc\u0642\u0647 \u062f\u06cc\u06af\u0647", 0xFF1F3A5C);
+                  s.setOnClickListener(new View.OnClickListener() {
+                      public void onClick(View v) { send("SNOOZE"); }
+                  });
+                  l.addView(d);
+                  l.addView(s);
+                  setContentView(l);
+                  Intent in = getIntent();
+                  show(in.getStringExtra("title"), in.getStringExtra("text"), in.getIntExtra("rep", 0));
+              }
+
+              @Override
+              protected void onNewIntent(Intent in) {
+                  super.onNewIntent(in);
+                  show(in.getStringExtra("title"), in.getStringExtra("text"), in.getIntExtra("rep", 0));
+              }
+
+              void show(String title, String text, int rep) {
+                  tTime.setText(new SimpleDateFormat("HH:mm", Locale.US).format(new Date()));
+                  tTitle.setText(title == null ? "" : title);
+                  tText.setText(text == null ? "" : text);
+                  tRep.setText(rep > 0 ? "\u062a\u06a9\u0631\u0627\u0631 " + rep : "");
+              }
+
+              TextView tv(int sp, int color) {
+                  TextView t = new TextView(this);
+                  t.setTextSize(sp);
+                  t.setTextColor(color);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(0, 12, 0, 12);
+                  return t;
+              }
+
+              Button btn(String s, int color) {
+                  Button b = new Button(this);
+                  b.setText(s);
+                  b.setTextSize(22);
+                  b.setTextColor(Color.WHITE);
+                  b.setBackgroundColor(color);
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 170);
+                  p.setMargins(0, 36, 0, 0);
+                  b.setLayoutParams(p);
+                  return b;
+              }
+
+              void send(String act) {
+                  try {
+                      Intent i = new Intent(this, RingService.class);
+                      i.setAction(act);
+                      startService(i);
+                  } catch (Exception e) {
+                  }
+                  finish();
+              }
+
+              @Override
+              public void onBackPressed() {
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (cur == this) cur = null;
+                  super.onDestroy();
               }
           }
           EOF_X
@@ -514,6 +1182,7 @@ jobs:
           .cd i b { display: inline-block; width: 5px; height: 5px; border-radius: 3px; margin: 0 1px; }
           .cd .gr { font-size: 9px; color: #6F86A3; }
           .cd.s .gr { color: #DDE8FF; }
+          .vcb { background: #0B1A2E; border: 1px dashed #2A4366; border-radius: 10px; padding: 8px; margin: 8px 0; }
           </style>
           </head>
           <body>
@@ -535,7 +1204,7 @@ jobs:
           var WDS = ['\u06cc', '\u062f', '\u0633', '\u0686', '\u067e', '\u062c', '\u0634'];
           var WORD = [6, 0, 1, 2, 3, 4, 5];
           var MOODS = [['anx', '\ud83d\ude30', '\u0627\u0636\u0637\u0631\u0627\u0628', -1], ['str', '\ud83d\ude23', '\u0627\u0633\u062a\u0631\u0633', -1], ['nrv', '\ud83d\ude24', '\u0641\u0634\u0627\u0631 \u0639\u0635\u0628\u06cc', -1], ['ang', '\ud83d\ude20', '\u062e\u0634\u0645', -1], ['sad', '\ud83d\ude14', '\u063a\u0645', -1], ['tir', '\ud83e\udd71', '\u062e\u0633\u062a\u06af\u06cc', -1], ['calm', '\ud83d\ude0c', '\u0622\u0631\u0627\u0645\u0634', 1], ['hap', '\ud83d\ude42', '\u062e\u0648\u0634\u062d\u0627\u0644\u06cc', 1], ['joy', '\ud83d\ude04', '\u0634\u0627\u062f\u06cc', 1]];
-          var TABS = [['today', '\u2600\ufe0f', '\u0631\u0648\u0632'], ['mood', '\ud83d\udcad', '\u0627\u062d\u0648\u0627\u0644'], ['night', '\ud83c\udf19', '\u0628\u0627\u0632\u0628\u06cc\u0646\u06cc'], ['trend', '\ud83d\udcca', '\u0631\u0648\u0646\u062f'], ['ai', '\ud83e\udde0', '\u0647\u0648\u0634'], ['set', '\u2699\ufe0f', '\u062a\u0646\u0638\u06cc\u0645\u0627\u062a']];
+          var TABS = [['today', '\u2600\ufe0f', '\u0631\u0648\u0632'], ['mood', '\ud83d\udcad', '\u0627\u062d\u0648\u0627\u0644'], ['ppl', '\ud83d\udc65', '\u0622\u062f\u0645\u200c\u0647\u0627'], ['need', '\ud83d\uded2', '\u0646\u06cc\u0627\u0632\u0647\u0627'], ['trend', '\ud83d\udcca', '\u062a\u062d\u0644\u06cc\u0644'], ['set', '\u2699\ufe0f', '\u062a\u0646\u0638\u06cc\u0645\u0627\u062a']];
           var DEF_PROMPT = '\u062a\u0648 \u0633\u06cc\u0633\u062a\u0645 \u0645\u062f\u06cc\u0631\u06cc\u062a \u0632\u0646\u062f\u06af\u06cc \u0634\u062e\u0635\u06cc\u060c \u0645\u0631\u0628\u06cc \u0627\u062c\u0631\u0627\u06cc\u06cc \u0648 \u062f\u0633\u062a\u06cc\u0627\u0631 \u062a\u0635\u0645\u06cc\u0645\u200c\u06af\u06cc\u0631\u06cc \u0645\u0646 \u0647\u0633\u062a\u06cc. \u0647\u062f\u0641: \u062a\u0628\u062f\u06cc\u0644 \u0647\u062f\u0641 \u0628\u0647 \u0627\u0642\u062f\u0627\u0645 \u0648\u0627\u0642\u0639\u06cc \u0648 \u0633\u0646\u062c\u06cc\u062f\u0646 \u0646\u062a\u06cc\u062c\u0647\u060c \u0646\u0647 \u0627\u0646\u06af\u06cc\u0632\u0647 \u062f\u0627\u062f\u0646.\n' +
             '\u0642\u0648\u0627\u0639\u062f:\n' +
             '\u06f1. \u0631\u0641\u062a\u0627\u0631 \u062b\u0628\u062a\u200c\u0634\u062f\u0647 \u0627\u0632 \u0646\u06cc\u062a \u0627\u0639\u0644\u0627\u0645\u200c\u0634\u062f\u0647 \u0645\u0639\u062a\u0628\u0631\u062a\u0631\u0647\u060c \u0648\u0644\u06cc \u06cc\u0647 \u0631\u0648\u0632 \u0628\u062f \u0645\u0639\u0631\u0641 \u0634\u062e\u0635\u06cc\u062a \u0645\u0646 \u0646\u06cc\u0633\u062a.\n' +
@@ -579,7 +1248,16 @@ jobs:
               { id: 'r1', n: '\ud83e\udea5 \u0645\u0633\u0648\u0627\u06a9', tms: ['08:00', '23:30'], m: 3, al: false, dw: [] },
               { id: 'r2', n: '\ud83c\udf7d \u063a\u0630\u0627', tms: ['09:00', '14:30', '21:30'], m: 20, al: false, dw: [] }
             ];
-            var d = { mt: '08:00', nt: '23:00', rem: true, ds: 4, sp: '', wk: '08:00', bt: '02:00', lb: 0 };
+            if (!S.ppl) S.ppl = [];
+            if (!S.nd) S.nd = [];
+            if (!S.secs) S.secs = [{ id: 'shop', n: '\ud83c\udfea \u0645\u063a\u0627\u0632\u0647' }, { id: 'home', n: '\ud83c\udfe0 \u062e\u0627\u0646\u0647' }, { id: 'me', n: '\ud83d\udc64 \u0634\u062e\u0635\u06cc' }];
+            if (!S.sites) S.sites = [
+              { id: 'okala', n: '\u0627\u0648\u06a9\u0627\u0644\u0627', u: 'https://www.okala.com', p: '' },
+              { id: 'dk', n: '\u062f\u06cc\u062c\u06cc\u200c\u06a9\u0627\u0644\u0627', u: 'https://www.digikala.com', p: '' },
+              { id: 'pd', n: '\u067e\u06cc\u0646\u200c\u062f\u06cc\u0633', u: 'https://pindis.com', p: '' },
+              { id: 'hm', n: '\u0647\u0627\u06cc\u0645\u0627\u0631\u062a', u: 'https://himart.ir', p: '' }
+            ];
+            var d = { rs: true, mt: '08:00', nt: '23:00', rem: true, ds: 4, sp: '', wk: '08:00', bt: '02:00', lb: 0 };
             for (var k in d) if (S.set[k] === undefined) S.set[k] = d[k];
           }
           fixS();
@@ -647,9 +1325,10 @@ jobs:
             d.setHours(Math.floor(m / 60), m % 60, 0, 0); return d.getTime();
           }
           function hmOf(ts) { var d = new Date(ts); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
-          function newDay() { return { e: 0, sl: '', h: '', c: '', wk: '', bt: '', sh: [], rt: {}, tasks: [], rv: null, ai: '', rp: [] }; }
-          function day(k) { var D = S.days[k]; if (!D) D = S.days[k] = newDay(); if (!D.sh) D.sh = []; if (!D.rt) D.rt = {}; if (!D.rp) D.rp = []; return D; }
-          function peek(k) { var D = S.days[k] || null; if (D) { if (!D.sh) D.sh = []; if (!D.rt) D.rt = {}; if (!D.rp) D.rp = []; } return D; }
+          function newDay() { return { e: 0, sl: '', h: '', c: '', wk: '', bt: '', sh: [], rt: {}, st: {}, tasks: [], rv: null, ai: '', rp: [] }; }
+          function fixD(D) { if (!D.sh) D.sh = []; if (!D.rt) D.rt = {}; if (!D.rp) D.rp = []; if (!D.st) D.st = {}; return D; }
+          function day(k) { var D = S.days[k]; if (!D) D = S.days[k] = newDay(); return fixD(D); }
+          function peek(k) { var D = S.days[k] || null; return D ? fixD(D) : null; }
           function findT(D, id) { for (var i = 0; i < D.tasks.length; i++) if (D.tasks[i].id == id) return D.tasks[i]; return null; }
           function moodOf(id) { for (var i = 0; i < MOODS.length; i++) if (MOODS[i][0] == id) return MOODS[i]; return ['?', '\u2754', '?', 0]; }
           function mdDay(k) { return S.md.filter(function (m) { return dk(m.t) == k; }); }
@@ -722,7 +1401,7 @@ jobs:
             return n;
           }
           function stats(keys) {
-            var r = { n: 0, e: 0, en: 0, sl: 0, sn: 0, mainT: 0, mainD: 0, aT: 0, aD: 0, tT: 0, tD: 0, sc: 0, scn: 0, ob: {}, rv: 0, hiS: [], loS: [], rtT: 0, rtD: 0, rtMiss: {}, shop: 0, shn: 0, md: {}, mdn: 0, mdNegB: [0, 0, 0, 0] };
+            var r = { n: 0, e: 0, en: 0, sl: 0, sn: 0, mainT: 0, mainD: 0, aT: 0, aD: 0, tT: 0, tD: 0, sc: 0, scn: 0, ob: {}, rv: 0, hiS: [], loS: [], rtT: 0, rtD: 0, rtMiss: {}, stT: 0, stD: 0, shop: 0, shn: 0, md: {}, mdn: 0, mdNegB: [0, 0, 0, 0] };
             keys.forEach(function (k) {
               mdDay(k).forEach(function (m) {
                 var o = r.md[m.k] || (r.md[m.k] = { n: 0, i: 0 }); o.n++; o.i += m.i || 0; r.mdn++;
@@ -741,6 +1420,7 @@ jobs:
                 if (t.g == 'A') { r.aT++; if (t.d) r.aD++; }
               });
               rtFor(k).forEach(function (x) { r.rtT++; if (D.rt[x.key]) r.rtD++; else r.rtMiss[x.r.n] = (r.rtMiss[x.r.n] || 0) + 1; });
+              S.sites.forEach(function (s) { r.stT++; if (D.st[s.id]) r.stD++; });
               if (D.rv) { r.rv++; if (D.rv.sc) { r.sc += D.rv.sc; r.scn++; } (D.rv.ob || []).forEach(function (o) { r.ob[o] = (r.ob[o] || 0) + 1; }); }
             });
             return r;
@@ -768,6 +1448,7 @@ jobs:
             if (D.tasks.length) { s += '\u06a9\u0627\u0631\u0647\u0627 (' + D.tasks.filter(function (t) { return t.d; }).length + ' \u0627\u0632 ' + D.tasks.length + ' \u0627\u0646\u062c\u0627\u0645 \u0634\u062f):\n'; D.tasks.forEach(function (t) { if (full || t.r || t.g == 'A' || t.d) s += tLine(t) + '\n'; }); }
             D.rp.forEach(function (p) { s += '\u062a\u0646\u0638\u06cc\u0645 \u0645\u062c\u062f\u062f (' + p.tm + '): \u0627\u0646\u0631\u0698\u06cc ' + (p.e || '?') + '/5\u060c ' + p.h + ' \u0633\u0627\u0639\u062a \u0645\u0648\u0646\u062f\u0647' + (p.n ? '\u060c ' + p.n : '') + '\n'; });
             if (md.length) { s += '\u0627\u062d\u0648\u0627\u0644:\n'; md.forEach(function (m) { s += mdLine(m) + '\n'; }); }
+            if (S.sites.length) s += '\u0633\u0627\u06cc\u062a\u200c\u0647\u0627\u06cc \u0648\u0627\u062c\u0628: ' + S.sites.filter(function (x) { return D.st[x.id]; }).length + ' \u0627\u0632 ' + S.sites.length + '\n';
             if (D.rv) {
               var v = D.rv;
               s += '\u0628\u0627\u0632\u0628\u06cc\u0646\u06cc: \u0627\u0645\u062a\u06cc\u0627\u0632 \u0631\u0648\u0632 ' + (v.sc || '?') + '/5' + ((v.ob || []).length ? ' | \u0645\u0648\u0627\u0646\u0639: ' + v.ob.join('\u060c ') : '') + '\n';
@@ -789,6 +1470,7 @@ jobs:
             if (r.aT) s += '\u0627\u0646\u062c\u0627\u0645 \u06a9\u0627\u0631\u0647\u0627\u06cc \u0636\u0631\u0648\u0631\u06cc (A): ' + r.aD + ' \u0627\u0632 ' + r.aT + '\n';
             if (r.tT) s += '\u06a9\u0644 \u06a9\u0627\u0631\u0647\u0627: ' + r.tD + ' \u0627\u0632 ' + r.tT + '\n';
             if (r.rtT) { s += '\u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a: ' + r.rtD + ' \u0627\u0632 ' + r.rtT; var ms = Object.keys(r.rtMiss); if (ms.length) s += ' (\u0628\u06cc\u0634\u062a\u0631\u06cc\u0646 \u062c\u0627\u0627\u0641\u062a\u0627\u062f\u0647: ' + ms.sort(function (a, b) { return r.rtMiss[b] - r.rtMiss[a]; }).slice(0, 3).map(function (x) { return x + ' \u00d7' + r.rtMiss[x]; }).join('\u060c ') + ')'; s += '\n'; }
+            if (r.stT) s += '\u0633\u0631 \u0632\u062f\u0646 \u0628\u0647 \u0633\u0627\u06cc\u062a\u200c\u0647\u0627\u06cc \u0648\u0627\u062c\u0628 \u0631\u0648\u0632\u0627\u0646\u0647: ' + r.stD + ' \u0627\u0632 ' + r.stT + '\n';
             var ob = Object.keys(r.ob); if (ob.length) s += '\u0645\u0648\u0627\u0646\u0639: ' + ob.map(function (o) { return o + ' \u00d7' + r.ob[o]; }).join('\u060c ') + '\n';
             if (r.hiS.length >= 2 && r.loS.length >= 2) s += '\u0627\u0646\u0631\u0698\u06cc \u0628\u0639\u062f \u0627\u0632 \u062e\u0648\u0627\u0628 \u06f7+ \u0633\u0627\u0639\u062a: ' + r1(avg(r.hiS)) + ' (' + r.hiS.length + ' \u0631\u0648\u0632) | \u06a9\u0645\u062a\u0631 \u0627\u0632 \u06f7: ' + r1(avg(r.loS)) + ' (' + r.loS.length + ' \u0631\u0648\u0632)\n';
             var mk = Object.keys(r.md);
@@ -813,17 +1495,20 @@ jobs:
 
           /* ---------- UI state ---------- */
           var SEL = dk(), TAB = 'today', EDIT = null, FORM = false, RP = false, CAL = null, MF = null, MDALL = false, RE = null, RV = null;
-          function go(t) { TAB = t; EDIT = null; FORM = false; RP = false; MF = null; RE = null; render(); window.scrollTo(0, 0); }
+          function go(t) { vcEnd(); VC = null; TAB = t; EDIT = null; FORM = false; RP = false; MF = null; RE = null; PF = null; NF = null; SED = null; PADD = ''; if (t != 'ppl') PP = null; render(); window.scrollTo(0, 0); }
           function appBack() {
             if (CAL) { closeCal(); return true; }
-            if (FORM || EDIT || RP || MF || RE) { FORM = false; EDIT = null; RP = false; MF = null; RE = null; render(); return true; }
+            if (FORM || EDIT || RP || MF || RE || PF || NF || SED || PADD) { vcEnd(); VC = null; FORM = false; EDIT = null; RP = false; MF = null; RE = null; PF = null; NF = null; SED = null; PADD = ''; render(); return true; }
+            if (PP) { PP = null; render(); return true; }
+            if (TAB == 'night') { go('today'); return true; }
             if (TAB != 'today') { go('today'); return true; }
             if (SEL != dk()) { setSel(dk()); return true; }
             return false;
           }
           function setSel(k) { SEL = k; RV = null; EDIT = null; FORM = false; RP = false; render(); }
           function shiftSel(n) { setSel(addD(SEL, n)); }
-          function nav() { $('nav').innerHTML = TABS.map(function (t) { return '<div class="' + (TAB == t[0] ? 'on' : '') + '" onclick="go(\'' + t[0] + '\')"><span>' + t[1] + '</span>' + t[2] + '</div>'; }).join(''); }
+          function rTrendAll() { return rTrend() + '<div class="dh" style="margin:14px 12px 0">\ud83e\udde0 \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc</div>' + rAi(); }
+          function nav() { var cur = TAB == 'night' ? 'today' : TAB == 'ai' ? 'trend' : TAB; $('nav').innerHTML = TABS.map(function (t) { return '<div class="' + (cur == t[0] ? 'on' : '') + '" onclick="go(\'' + t[0] + '\')"><span>' + t[1] + '</span>' + t[2] + '</div>'; }).join(''); }
           function chips(name, n, cur, fn) {
             var h = '<div class="chips">';
             for (var i = 1; i <= n; i++) h += '<span id="' + fn + i + '" class="chip' + (cur == i ? ' on' : '') + '" onclick="' + fn + '(' + i + ')">' + fa(i) + (name ? ' ' + name[i] : '') + '</span>';
@@ -834,8 +1519,8 @@ jobs:
             nav();
             var j = jOf(SEL), t = SEL == dk();
             $('dt').innerHTML = '\ud83d\udcc5 ' + (t ? '\u0627\u0645\u0631\u0648\u0632\u060c ' : '') + WD[kDate(SEL).getDay()] + ' ' + fa(j[2]) + ' ' + MON[j[1] - 1];
-            $('ttl').textContent = { today: '\u2600\ufe0f \u0631\u0648\u0632', mood: '\ud83d\udcad \u0627\u062d\u0648\u0627\u0644', night: '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc', trend: '\ud83d\udcca \u0631\u0648\u0646\u062f', ai: '\ud83e\udde0 \u0647\u0648\u0634', set: '\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a' }[TAB];
-            $('pg').innerHTML = { today: rToday, mood: rMood, night: rNight, trend: rTrend, ai: rAi, set: rSet }[TAB]();
+            $('ttl').textContent = { today: '\u2600\ufe0f \u0631\u0648\u0632', mood: '\ud83d\udcad \u0627\u062d\u0648\u0627\u0644', night: '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc', trend: '\ud83d\udcca \u062a\u062d\u0644\u06cc\u0644', ai: '\ud83d\udcca \u062a\u062d\u0644\u06cc\u0644', set: '\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a', ppl: '\ud83d\udc65 \u0622\u062f\u0645\u200c\u0647\u0627', need: '\ud83d\uded2 \u0646\u06cc\u0627\u0632\u0647\u0627' }[TAB];
+            $('pg').innerHTML = { today: rToday, mood: rMood, night: rNight, trend: rTrendAll, ai: rTrendAll, set: rSet, ppl: rPpl, need: rNeed }[TAB]();
           }
 
           /* ---------- calendar ---------- */
@@ -881,6 +1566,7 @@ jobs:
             h += rShifts(D);
             h += '<div id="dyn">' + rDyn() + '</div>';
             h += rRoutines(D, k);
+            h += rSites(D, k);
             h += '<div class="box"><div class="row"><h3>\u06a9\u0627\u0631\u0647\u0627</h3><span><button class="btn s" onclick="openForm()">\u2795 \u06a9\u0627\u0631</button> <button class="btn g s" onclick="RP=!RP;FORM=false;EDIT=null;render()">\ud83d\udd04 \u062a\u0646\u0638\u06cc\u0645 \u0645\u062c\u062f\u062f</button></span></div>';
             if (RP) h += rReplan(D);
             if (FORM && !EDIT) h += rForm(null);
@@ -892,6 +1578,7 @@ jobs:
             if (!ord.length && !FORM) h += '<div class="mut">\u0647\u0646\u0648\u0632 \u06a9\u0627\u0631\u06cc \u0646\u06cc\u0633\u062a. \u00ab\u0631\u0648\u06cc \u06a9\u0633\u0628\u200c\u0648\u06a9\u0627\u0631 \u06a9\u0627\u0631 \u06a9\u0646\u00bb \u0646\u0646\u0648\u06cc\u0633\u061b \u0628\u0646\u0648\u06cc\u0633 \u00ab\u0641\u0631\u0648\u0634 \u06f7 \u0631\u0648\u0632 \u0627\u062e\u06cc\u0631 \u0631\u0648 \u062b\u0628\u062a \u06a9\u0646 \u0648 \u06f3 \u06a9\u0627\u0644\u0627\u06cc \u06a9\u0645\u200c\u06af\u0631\u062f\u0634 \u0631\u0648 \u067e\u06cc\u062f\u0627 \u06a9\u0646\u00bb.</div>';
             ord.forEach(function (t) { h += EDIT == t.id ? rForm(t) : rTask(t); });
             h += '</div>';
+            h += '<div class="box"><button class="btn g w" onclick="go(\'night\')">\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0634\u0628</button></div>';
             return h;
           }
           function rDyn() {
@@ -938,7 +1625,7 @@ jobs:
             list.forEach(function (x) {
               var ok = !!D.rt[x.key], late = !ok && now >= 0 && tmin(x.tm) + 30 < now;
               h += '<div class="task' + (ok ? ' done' : '') + '"><div class="row" style="flex-wrap:nowrap"><span class="ck' + (ok ? ' on' : late ? ' late' : '') + '" onclick="rtTgl(\'' + x.key + '\')">' + (ok ? '\u2713' : '') + '</span>' +
-                '<div class="tt f1"><b>' + esc(x.r.n) + '</b> <span class="tm">' + fa(x.tm) + '</span>' + (x.r.al ? ' \ud83d\udd14' : '') + (late ? ' <span class="sm" style="color:#E0A040">\u06af\u0630\u0634\u062a\u0647</span>' : '') +
+                '<div class="tt f1"><b>' + esc(x.r.n) + '</b> <span class="tm">' + fa(x.tm) + '</span>' + (x.r.al ? (x.r.vc ? ' \ud83c\udf99' : ' \u23f0') : '') + (late ? ' <span class="sm" style="color:#E0A040">\u06af\u0630\u0634\u062a\u0647</span>' : '') +
                 (ok && typeof D.rt[x.key] == 'number' ? '<span class="mut sm"> \u00b7 ' + fa(hmOf(D.rt[x.key])) + '</span>' : '') + '</div></div></div>';
             });
             return h + '</div>';
@@ -946,8 +1633,8 @@ jobs:
           function rtTgl(key) { var D = day(SEL); if (D.rt[key]) delete D.rt[key]; else D.rt[key] = Date.now(); save(); render(); }
           function rTask(t) {
             return '<div class="task' + (t.d ? ' done' : '') + '"><div class="row" style="flex-wrap:nowrap"><span class="ck' + (t.d ? ' on' : '') + '" onclick="tgl(\'' + t.id + '\')">' + (t.d ? '\u2713' : '') + '</span>' +
-              '<div class="tt f1" onclick="EDIT=\'' + t.id + '\';FORM=false;render()"><b>' + (t.r == 'main' ? '\u2b50 ' : t.r == 'sec' ? '\u2606 ' : '') + esc(t.t) + '</b><br><span class="g g' + t.g + '">' + t.g + '</span>' +
-              (t.tm ? '<span class="tm">\u23f0 ' + fa(t.tm) + (t.al ? ' \ud83d\udd14' : '') + '</span>' : '') + '<span class="mut sm">' + (num(t.m) ? fa(num(t.m)) + ' \u062f\u0642\u06cc\u0642\u0647' : '\u0628\u062f\u0648\u0646 \u0632\u0645\u0627\u0646') + (t.f ? ' \u00b7 \u0627\u0632 ' + jStr(t.f) : '') + '</span>' +
+              '<div class="tt f1" onclick="tEdit(\'' + t.id + '\')"><b>' + (t.r == 'main' ? '\u2b50 ' : t.r == 'sec' ? '\u2606 ' : '') + esc(t.t) + '</b><br><span class="g g' + t.g + '">' + t.g + '</span>' +
+              (t.tm ? '<span class="tm">\u23f0 ' + fa(t.tm) + (t.al ? (t.vc ? ' \ud83c\udf99' : ' \ud83d\udd14') : '') + '</span>' : '') + '<span class="mut sm">' + (num(t.m) ? fa(num(t.m)) + ' \u062f\u0642\u06cc\u0642\u0647' : '\u0628\u062f\u0648\u0646 \u0632\u0645\u0627\u0646') + (t.f ? ' \u00b7 \u0627\u0632 ' + jStr(t.f) : '') + '</span>' +
               (t.na ? '<div class="mut sm">\u25b6\ufe0f ' + esc(t.na) + '</div>' : '') + (t.end ? '<div class="mut sm">\ud83c\udfc1 ' + esc(t.end) + '</div>' : '') + '</div></div>' +
               (t.d ? '' : '<div style="margin-top:4px"><button class="btn g s" onclick="setMain(\'' + t.id + '\')">\u2b50 \u0627\u0635\u0644\u06cc</button> <button class="btn g s" onclick="setSec(\'' + t.id + '\')">\u2606 \u062b\u0627\u0646\u0648\u06cc\u0647</button> <button class="btn g s" onclick="tmrw(\'' + t.id + '\')">\u27a1\ufe0f \u0641\u0631\u062f\u0627</button></div>') + '</div>';
           }
@@ -958,10 +1645,10 @@ jobs:
               '<label>\u06af\u0631\u0648\u0647</label><div class="chips">' + g + '</div><input type="hidden" id="fGv" value="' + x.g + '">' +
               '<div class="row"><div class="f1"><label>\u0632\u0645\u0627\u0646 \u062a\u0642\u0631\u06cc\u0628\u06cc (\u062f\u0642\u06cc\u0642\u0647)</label><input id="fM" inputmode="numeric" value="' + esc(x.m) + '"></div>' +
               '<div class="f1"><label>\u0633\u0627\u0639\u062a (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="fTm" type="time" value="' + esc(x.tm) + '"></div></div>' +
-              '<label><input type="checkbox" id="fAl" ' + (x.al ? 'checked' : '') + '> \ud83d\udd14 \u0622\u0644\u0627\u0631\u0645 \u0633\u0631 \u0647\u0645\u06cc\u0646 \u0633\u0627\u0639\u062a</label><br><br>' +
+              '<label><input type="checkbox" id="fAl" ' + (x.al ? 'checked' : '') + '> \u23f0 \u0622\u0644\u0627\u0631\u0645 \u0635\u0648\u062a\u06cc \u0633\u0631 \u0647\u0645\u06cc\u0646 \u0633\u0627\u0639\u062a</label>' + vcBox() + '<br>' +
               '<label>\u0627\u0642\u062f\u0627\u0645 \u0628\u0639\u062f\u06cc (\u0627\u0648\u0644\u06cc\u0646 \u062d\u0631\u06a9\u062a \u0641\u06cc\u0632\u06cc\u06a9\u06cc)</label><input id="fN" value="' + esc(x.na) + '">' +
               '<label>\u0645\u0639\u06cc\u0627\u0631 \u067e\u0627\u06cc\u0627\u0646 (\u06a9\u0650\u06cc \u062a\u0645\u0648\u0645\u0647\u061f)</label><input id="fE" value="' + esc(x.end) + '">' +
-              '<button class="btn" onclick="saveTask(' + (t ? '\'' + t.id + '\'' : 'null') + ')">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="FORM=false;EDIT=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' +
+              '<button class="btn" onclick="saveTask(' + (t ? '\'' + t.id + '\'' : 'null') + ')">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="vcEnd();VC=null;FORM=false;EDIT=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' +
               (t ? ' <button class="btn r" onclick="delTask(\'' + t.id + '\')">\ud83d\uddd1 \u062d\u0630\u0641</button>' + (t.d ? '' : ' <button class="btn g" onclick="setNone(\'' + t.id + '\')">\u0639\u0627\u062f\u06cc \u06a9\u0646</button>') : '') + '</div>';
           }
           function rReplan(D) {
@@ -970,15 +1657,18 @@ jobs:
               '<label>\u0686\u0646\u062f \u0633\u0627\u0639\u062a \u0622\u0632\u0627\u062f \u062a\u0627 \u0622\u062e\u0631 \u0631\u0648\u0632 \u0645\u0648\u0646\u062f\u0647\u061f</label><input id="rpH" inputmode="decimal">' +
               '<label>\u0686\u06cc \u0634\u062f\u061f (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="rpN"><button class="btn" onclick="doReplan()">\u2705 \u062f\u0648\u0628\u0627\u0631\u0647 \u0628\u0686\u06cc\u0646</button></div>';
           }
+          var FID = '';
+          function tEdit(id) { var t = findT(day(SEL), id); EDIT = id; FORM = false; vcInit('vt' + id, t && t.vc); render(); }
           function setE(n) { day(SEL).e = n; save(); hiChip('setE', n); refreshDyn(); }
           function setF(f, v) { day(SEL)[f] = v; save(); refreshDyn(); }
-          function openForm() { FORM = true; EDIT = null; RP = false; render(); setTimeout(function () { var el = $('fT'); if (el) el.focus(); }, 50); }
+          function openForm() { FORM = true; EDIT = null; RP = false; FID = uid(); vcInit('vt' + FID, false); render(); setTimeout(function () { var el = $('fT'); if (el) el.focus(); }, 50); }
           function fG(q) { $('fGv').value = q; ['A', 'B', 'C', 'D'].forEach(function (z) { $('fg' + z).className = 'chip' + (z == q ? ' on' : ''); }); }
           function saveTask(id) {
             var D = day(SEL), title = trim($('fT').value);
             if (!title) { toast('\u0639\u0646\u0648\u0627\u0646 \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
             var t = id ? findT(D, id) : null;
-            if (!t) { t = { id: uid(), r: '', d: false }; D.tasks.push(t); }
+            if (!t) { t = { id: FID || uid(), r: '', d: false }; D.tasks.push(t); }
+            vcEnd(); t.vc = VC && VC.has ? VC.id : ''; VC = null;
             t.t = title; t.g = $('fGv').value; t.m = String(num($('fM').value) || ''); t.na = $('fN').value; t.end = $('fE').value;
             t.tm = $('fTm').value || ''; t.al = !!($('fAl').checked && t.tm);
             if ($('fAl').checked && !t.tm) toast('\u0628\u0631\u0627\u06cc \u0622\u0644\u0627\u0631\u0645\u060c \u0633\u0627\u0639\u062a \u0631\u0648 \u0647\u0645 \u0628\u0630\u0627\u0631');
@@ -1144,15 +1834,16 @@ jobs:
           /* ---------- settings ---------- */
           function rSet() {
             var s = S.set;
-            return '<div class="box"><h3>\ud83d\udd14 \u06cc\u0627\u062f\u0622\u0648\u0631 \u0631\u0648\u0632\u0627\u0646\u0647</h3><label><input type="checkbox" ' + (s.rem ? 'checked' : '') + ' onchange="S.set.rem=this.checked;save()"> \u06cc\u0627\u062f\u0622\u0648\u0631 \u0628\u0631\u0646\u0627\u0645\u0647 \u0635\u0628\u062d \u0648 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0634\u0628</label>' +
+            return rPerms() + '<div class="box"><h3>\ud83d\udd14 \u06cc\u0627\u062f\u0622\u0648\u0631 \u0631\u0648\u0632\u0627\u0646\u0647</h3><label><input type="checkbox" ' + (s.rem ? 'checked' : '') + ' onchange="S.set.rem=this.checked;save()"> \u06cc\u0627\u062f\u0622\u0648\u0631 \u0628\u0631\u0646\u0627\u0645\u0647 \u0635\u0628\u062d \u0648 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0634\u0628</label>' +
               '<div class="row"><div class="f1"><label>\u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc</label><input type="time" value="' + s.mt + '" onchange="S.set.mt=this.value;save()"></div><div class="f1"><label>\u0628\u0627\u0632\u0628\u06cc\u0646\u06cc</label><input type="time" value="' + s.nt + '" onchange="S.set.nt=this.value;save()"></div></div>' +
-              '<div class="mut sm">\u0622\u0644\u0627\u0631\u0645 \u06a9\u0627\u0631\u0647\u0627 \u0648 \u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a \u0647\u0645 \u062e\u0648\u062f\u06a9\u0627\u0631 \u062a\u0646\u0638\u06cc\u0645 \u0645\u06cc\u0634\u0646\u060c \u062d\u062a\u06cc \u0628\u0639\u062f \u0627\u0632 \u0631\u06cc\u0633\u062a\u0627\u0631\u062a \u06af\u0648\u0634\u06cc.</div><button class="btn g s" onclick="testN()">\ud83e\uddea \u0646\u0648\u062a\u06cc\u0641 \u0622\u0632\u0645\u0627\u06cc\u0634\u06cc (\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u0628\u0639\u062f)</button></div>' +
+              '<label><input type="checkbox" ' + (s.rs ? 'checked' : '') + ' onchange="S.set.rs=this.checked;save()"> \u23f0 \u0627\u06cc\u0646 \u062f\u0648 \u062a\u0627 \u0647\u0645 \u0622\u0644\u0627\u0631\u0645 \u0635\u0648\u062a\u06cc \u0628\u0627\u0634\u0646 (\u0646\u0647 \u0641\u0642\u0637 \u0646\u0648\u062a\u06cc\u0641)</label>' +
+              '<div class="mut sm">\u0622\u0644\u0627\u0631\u0645 \u06a9\u0627\u0631\u0647\u0627\u060c \u0646\u0648\u0628\u062a\u200c\u0647\u0627 \u0648 \u0628\u0631\u0646\u0627\u0645\u0647 \u062b\u0627\u0628\u062a \u062e\u0648\u062f\u06a9\u0627\u0631 \u062a\u0646\u0638\u06cc\u0645 \u0645\u06cc\u0634\u0646\u060c \u062d\u062a\u06cc \u0628\u0639\u062f \u0627\u0632 \u0631\u06cc\u0633\u062a\u0627\u0631\u062a \u06af\u0648\u0634\u06cc.</div></div>' +
               '<div class="box"><h3>\ud83d\udd53 \u0631\u0648\u0632 \u0645\u0646</h3><div class="row"><div class="f1"><label>\u0628\u06cc\u062f\u0627\u0631\u06cc \u0645\u0639\u0645\u0648\u0644</label><input type="time" value="' + s.wk + '" onchange="S.set.wk=this.value;save()"></div><div class="f1"><label>\u062e\u0648\u0627\u0628 \u0645\u0639\u0645\u0648\u0644</label><input type="time" value="' + s.bt + '" onchange="S.set.bt=this.value;save()"></div></div>' +
               '<label>\u0631\u0648\u0632 \u062a\u0627 \u0633\u0627\u0639\u062a \u0686\u0646\u062f \u0628\u0627\u0645\u062f\u0627\u062f \u0627\u062f\u0627\u0645\u0647 \u062f\u0627\u0631\u0647\u061f</label><input inputmode="numeric" value="' + fa(s.ds) + '" onchange="S.set.ds=Math.max(0,Math.min(10,Math.round(num(this.value))));save();SEL=dk();render()">' +
               '<div class="mut sm">\u0645\u062b\u0644\u0627\u064b \u06f4: \u06a9\u0627\u0631\u0647\u0627\u06cc \u0633\u0627\u0639\u062a \u06f1 \u0648 \u06f3 \u0628\u0627\u0645\u062f\u0627\u062f \u062c\u0632\u0648 \u0647\u0645\u0648\u0646 \u0631\u0648\u0632\u0646 \u0648 \u062a\u0631\u062a\u06cc\u0628\u0634\u0648\u0646 \u0628\u0639\u062f \u0627\u0632 \u06f2\u06f3 \u0645\u06cc\u0627\u062f.</div></div>' +
-              rRtEdit() +
+              rRtEdit() + rSiteEdit() + rSecEdit() +
               '<div class="box"><h3>\ud83e\udde0 \u067e\u0631\u0627\u0645\u067e\u062a \u0627\u0635\u0644\u06cc</h3><div class="mut sm">\u062e\u0627\u0644\u06cc \u06cc\u0627 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 = \u0646\u0633\u062e\u0647 \u062e\u0644\u0627\u0635\u0647. \u0645\u06cc\u200c\u062a\u0648\u0646\u06cc \u067e\u0631\u0627\u0645\u067e\u062a \u06a9\u0627\u0645\u0644\u062a \u0631\u0648 \u0627\u06cc\u0646\u062c\u0627 \u0628\u0630\u0627\u0631\u06cc.</div><textarea id="spT" style="min-height:140px;font-size:12px">' + esc(s.sp || DEF_PROMPT) + '</textarea><button class="btn s" onclick="saveSp()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g s" onclick="S.set.sp=\'\';save();render();toast(\'\u067e\u06cc\u0634\u200c\u0641\u0631\u0636 \u0628\u0631\u06af\u0634\u062a\')">\u21a9\ufe0f \u067e\u06cc\u0634\u200c\u0641\u0631\u0636</button></div>' +
-              '<div class="box"><h3>\ud83d\udcbe \u062d\u0641\u0638 \u062f\u0627\u062f\u0647\u200c\u0647\u0627</h3><div class="mut sm">\u062f\u0627\u062f\u0647\u200c\u0647\u0627 \u0631\u0648\u06cc \u06af\u0648\u0634\u06cc \u0645\u06cc\u200c\u0645\u0648\u0646\u0646 \u0648 \u0628\u0627 \u0622\u067e\u062f\u06cc\u062a \u067e\u0627\u06a9 \u0646\u0645\u06cc\u0634\u0646 (\u0627\u0645\u0636\u0627\u06cc \u062b\u0627\u0628\u062a). \u0648\u0644\u06cc \u0627\u06af\u0647 \u0627\u067e \u067e\u0627\u06a9 \u0628\u0634\u0647 \u06cc\u0627 \u06af\u0648\u0634\u06cc \u0639\u0648\u0636 \u0628\u0634\u0647\u060c \u0641\u0642\u0637 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0646\u062c\u0627\u062a\u062a \u0645\u06cc\u062f\u0647. \u0647\u0641\u062a\u0647\u200c\u0627\u06cc \u06cc\u0647 \u0628\u0627\u0631 \u0628\u0641\u0631\u0633\u062a\u0634 \u062a\u0648 ClickUp \u06cc\u0627 \u062a\u0644\u06af\u0631\u0627\u0645.' + (s.lb ? '<br>\u0622\u062e\u0631\u06cc\u0646 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646: ' + jStr(dk(s.lb)) : '') + '</div>' +
+              '<div class="box"><h3>\ud83d\udcbe \u062d\u0641\u0638 \u062f\u0627\u062f\u0647\u200c\u0647\u0627</h3><div class="mut sm">\u062f\u0627\u062f\u0647\u200c\u0647\u0627 \u0631\u0648\u06cc \u06af\u0648\u0634\u06cc \u0645\u06cc\u200c\u0645\u0648\u0646\u0646 \u0648 \u0628\u0627 \u0622\u067e\u062f\u06cc\u062a \u067e\u0627\u06a9 \u0646\u0645\u06cc\u0634\u0646 (\u0627\u0645\u0636\u0627\u06cc \u062b\u0627\u0628\u062a). \u0648\u0644\u06cc \u0627\u06af\u0647 \u0627\u067e \u067e\u0627\u06a9 \u0628\u0634\u0647 \u06cc\u0627 \u06af\u0648\u0634\u06cc \u0639\u0648\u0636 \u0628\u0634\u0647\u060c \u0641\u0642\u0637 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0646\u062c\u0627\u062a\u062a \u0645\u06cc\u062f\u0647. \u0647\u0641\u062a\u0647\u200c\u0627\u06cc \u06cc\u0647 \u0628\u0627\u0631 \u0628\u0641\u0631\u0633\u062a\u0634 \u06cc\u0647 \u062c\u0627\u06cc \u062e\u0635\u0648\u0635\u06cc (\u067e\u06cc\u0627\u0645\u200c\u0647\u0627\u06cc \u0630\u062e\u06cc\u0631\u0647\u200c\u0634\u062f\u0647 \u062e\u0648\u062f\u062a). \u26a0\ufe0f \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0634\u0627\u0645\u0644 \u0634\u0645\u0627\u0631\u0647 \u06a9\u0627\u0631\u062a \u0648 \u062d\u0633\u0627\u0628\u200c\u0647\u0627\u0633\u062a\u061b \u062a\u0648 \u06af\u0631\u0648\u0647 \u06cc\u0627 \u062c\u0627\u06cc \u0639\u0645\u0648\u0645\u06cc \u0646\u0641\u0631\u0633\u062a\u0634.' + (s.lb ? '<br>\u0622\u062e\u0631\u06cc\u0646 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646: ' + jStr(dk(s.lb)) : '') + '</div>' +
               '<button class="btn s" onclick="shareB()">\ud83d\udce4 \u0627\u0631\u0633\u0627\u0644 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646</button> <button class="btn g s" onclick="backup()">\ud83d\udccb \u06a9\u067e\u06cc</button> <button class="btn g s" onclick="restore()">\ud83d\udce5 \u0628\u0627\u0632\u06cc\u0627\u0628\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f</button> <button class="btn g s" onclick="restoreSnap()">\u23ea \u0646\u0633\u062e\u0647 \u062e\u0648\u062f\u06a9\u0627\u0631 \u062f\u06cc\u0631\u0648\u0632</button></div>' +
               '<div class="box"><h3>\ud83c\udd95 \u0622\u067e\u062f\u06cc\u062a</h3><div class="mut">\u0646\u0633\u062e\u0647 \u0641\u0639\u0644\u06cc: v' + fa(BUILD) + '</div><button class="btn s" onclick="checkUpdate(true)">\u0628\u0631\u0631\u0633\u06cc \u0622\u067e\u062f\u06cc\u062a</button></div>' +
               '<div class="box"><button class="btn r s" onclick="resetAll()">\ud83d\uddd1 \u067e\u0627\u06a9 \u06a9\u0631\u062f\u0646 \u0647\u0645\u0647 \u062f\u0627\u062f\u0647\u200c\u0647\u0627</button></div>';
@@ -1162,13 +1853,15 @@ jobs:
             if (RE && !RE.id) h += reForm();
             S.rt.forEach(function (r) {
               if (RE && RE.id == r.id) { h += reForm(); return; }
-              h += '<div class="task" onclick="reOpen(\'' + r.id + '\')"><b>' + esc(r.n) + '</b>' + (r.al ? ' \ud83d\udd14' : '') + '<div class="mut sm">' + r.tms.map(function (t) { return '<span class="tm">' + fa(t) + '</span>'; }).join(' ') + ' \u00b7 ' + fa(num(r.m) || 0) + ' \u062f\u0642\u06cc\u0642\u0647 \u00b7 ' + (r.dw && r.dw.length ? WORD.filter(function (w) { return r.dw.indexOf(w) >= 0; }).map(function (w) { return WD[w]; }).join('\u060c ') : '\u0647\u0631 \u0631\u0648\u0632') + '</div></div>';
+              h += '<div class="task" onclick="reOpen(\'' + r.id + '\')"><b>' + esc(r.n) + '</b>' + (r.al ? (r.vc ? ' \ud83c\udf99' : ' \u23f0') : '') + '<div class="mut sm">' + r.tms.map(function (t) { return '<span class="tm">' + fa(t) + '</span>'; }).join(' ') + ' \u00b7 ' + fa(num(r.m) || 0) + ' \u062f\u0642\u06cc\u0642\u0647 \u00b7 ' + (r.dw && r.dw.length ? WORD.filter(function (w) { return r.dw.indexOf(w) >= 0; }).map(function (w) { return WD[w]; }).join('\u060c ') : '\u0647\u0631 \u0631\u0648\u0632') + '</div></div>';
             });
             return h + '</div>';
           }
           function reOpen(id) {
             var r = null; S.rt.forEach(function (x) { if (x.id == id) r = x; });
             RE = r ? JSON.parse(JSON.stringify(r)) : { id: '', n: '', tms: ['08:00'], m: 5, al: false, dw: [] };
+            if (!RE.vid) RE.vid = r ? r.id : 'r' + uid();
+            vcInit('vr' + RE.vid, r && r.vc);
             render(); var b = $('rtbox'); if (b) b.scrollIntoView();
           }
           function reForm() {
@@ -1177,9 +1870,9 @@ jobs:
             RE.tms.forEach(function (t, i) { h += '<div class="row" style="flex-wrap:nowrap"><span class="sm">' + fa(i + 1) + '</span><input type="time" id="reT' + i + '" value="' + esc(t) + '" style="flex:1">' + (RE.tms.length > 1 ? '<span class="chip" onclick="reDelT(' + i + ')">\u2715</span>' : '') + '</div>'; });
             h += '<button class="btn g s" onclick="reAddT()">\u2795 \u0646\u0648\u0628\u062a \u062f\u06cc\u06af\u0647</button>' +
               '<label><br>\u0645\u062f\u062a \u0647\u0631 \u0646\u0648\u0628\u062a (\u062f\u0642\u06cc\u0642\u0647)</label><input id="reM" inputmode="numeric" value="' + esc(RE.m) + '">' +
-              '<label><input type="checkbox" id="reAl" ' + (RE.al ? 'checked' : '') + '> \ud83d\udd14 \u0622\u0644\u0627\u0631\u0645 \u0633\u0631 \u0647\u0631 \u0646\u0648\u0628\u062a</label>' +
+              '<label><input type="checkbox" id="reAl" ' + (RE.al ? 'checked' : '') + '> \u23f0 \u0622\u0644\u0627\u0631\u0645 \u0635\u0648\u062a\u06cc \u0633\u0631 \u0647\u0631 \u0646\u0648\u0628\u062a</label>' + vcBox() +
               '<label><br><br>\u0631\u0648\u0632\u0647\u0627 (\u0647\u06cc\u0686\u200c\u06a9\u062f\u0648\u0645 = \u0647\u0631 \u0631\u0648\u0632)</label><div class="chips">' + WORD.map(function (w) { return '<span class="chip' + (RE.dw.indexOf(w) >= 0 ? ' on' : '') + '" onclick="reDw(' + w + ')">' + WD[w] + '</span>'; }).join('') + '</div>' +
-              '<button class="btn" onclick="reSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="RE=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' + (RE.id ? ' <button class="btn r" onclick="reDel()">\ud83d\uddd1 \u062d\u0630\u0641</button>' : '') + '</div>';
+              '<button class="btn" onclick="reSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="vcEnd();VC=null;RE=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' + (RE.id ? ' <button class="btn r" onclick="reDel()">\ud83d\uddd1 \u062d\u0630\u0641</button>' : '') + '</div>';
             return h;
           }
           function reGrab() {
@@ -1197,7 +1890,8 @@ jobs:
             if (!RE.tms.length) { toast('\u062d\u062f\u0627\u0642\u0644 \u06cc\u0647 \u0633\u0627\u0639\u062a \u0628\u0630\u0627\u0631'); return; }
             RE.tms.sort(function (a, b) { return tmin(a) - tmin(b); });
             RE.m = num(RE.m) || 0;
-            if (!RE.id) { RE.id = 'r' + uid(); S.rt.push(RE); }
+            vcEnd(); RE.vc = VC && VC.has ? VC.id : ''; VC = null;
+            if (!RE.id) { RE.id = RE.vid; S.rt.push(RE); }
             else for (var i = 0; i < S.rt.length; i++) if (S.rt[i].id == RE.id) S.rt[i] = RE;
             RE = null; save(); render(); toast('\u2705 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f');
           }
@@ -1220,20 +1914,20 @@ jobs:
             delete o.sk; loadB(o); toast('\u2705 \u0628\u0631\u06af\u0634\u062a');
           }
           function snap() { var k = dk(); if (ld('life1_bk', '') != k) { var o = JSON.parse(JSON.stringify(S)); o.sk = k; sv('life1_bak', o); sv('life1_bk', k); } }
-          function resetAll() { if (!confirm('\u0647\u0645\u0647 \u0631\u0648\u0632\u0647\u0627\u060c \u0627\u062d\u0648\u0627\u0644 \u0648 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f \u0628\u0631\u06af\u0634\u062a \u0646\u062f\u0627\u0631\u0647.')) return; if (!confirm('\u0645\u0637\u0645\u0626\u0646\u06cc\u061f \u0627\u0648\u0644 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0628\u06af\u06cc\u0631.')) return; S = { v: 2, days: {}, set: S.set, rt: S.rt }; fixS(); save(); go('today'); }
+          function resetAll() { if (!confirm('\u0647\u0645\u0647 \u0631\u0648\u0632\u0647\u0627\u060c \u0627\u062d\u0648\u0627\u0644\u060c \u0622\u062f\u0645\u200c\u0647\u0627\u060c \u062d\u0633\u0627\u0628\u200c\u0647\u0627 \u0648 \u0646\u06cc\u0627\u0632\u0647\u0627 \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f \u0628\u0631\u06af\u0634\u062a \u0646\u062f\u0627\u0631\u0647.')) return; if (!confirm('\u0645\u0637\u0645\u0626\u0646\u06cc\u061f \u0627\u0648\u0644 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0628\u06af\u06cc\u0631.')) return; S = { v: 2, days: {}, set: S.set, rt: S.rt, sites: S.sites, secs: S.secs }; fixS(); save(); go('today'); }
 
           /* ---------- alarms ---------- */
           function want() {
             var w = {}, now = Date.now(), k0 = dk();
-            function add(id, t, a, b) { if (t > now + 5000) w[id] = [t, a, b]; }
+            function add(id, t, a, b, v, rg) { if (t > now + 5000) w[id] = [t, a, b, v || '', rg !== false]; }
             for (var i = 0; i < 8; i++) (function (k, i) {
-              if (S.set.rem && i < 7) { add('m' + k, tsOf(k, S.set.mt), '\u2600\ufe0f \u0628\u0631\u0646\u0627\u0645\u0647 \u0631\u0648\u0632', '\u0627\u0646\u0631\u0698\u06cc\u060c \u0646\u0648\u0628\u062a\u200c\u0647\u0627\u06cc \u0645\u063a\u0627\u0632\u0647 \u0648 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc \u0631\u0648 \u062b\u0628\u062a \u06a9\u0646'); add('n' + k, tsOf(k, S.set.nt), '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0631\u0648\u0632', '\u0686\u06cc \u0627\u0646\u062c\u0627\u0645 \u0634\u062f\u061f \u0686\u06cc \u0645\u0627\u0646\u0639 \u0634\u062f\u061f \u06cc\u0647 \u062d\u0633 \u0647\u0645 \u062b\u0628\u062a \u06a9\u0646'); }
+              if (S.set.rem && i < 7) { add('m' + k, tsOf(k, S.set.mt), '\u2600\ufe0f \u0628\u0631\u0646\u0627\u0645\u0647 \u0631\u0648\u0632', '\u0627\u0646\u0631\u0698\u06cc\u060c \u0646\u0648\u0628\u062a\u200c\u0647\u0627\u06cc \u0645\u063a\u0627\u0632\u0647 \u0648 \u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0635\u0644\u06cc \u0631\u0648 \u062b\u0628\u062a \u06a9\u0646', '', !!S.set.rs); add('n' + k, tsOf(k, S.set.nt), '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u0631\u0648\u0632', '\u0686\u06cc \u0627\u0646\u062c\u0627\u0645 \u0634\u062f\u061f \u0686\u06cc \u0645\u0627\u0646\u0639 \u0634\u062f\u061f \u06cc\u0647 \u062d\u0633 \u0647\u0645 \u062b\u0628\u062a \u06a9\u0646', '', !!S.set.rs); }
               var D = peek(k);
               if (D) {
-                D.tasks.forEach(function (t) { if (t.al && t.tm && !t.d && !t.mv) add('t' + t.id, tsOf(k, t.tm), '\u23f0 ' + t.tm + ' \u00b7 ' + t.t, t.na ? '\u25b6\ufe0f ' + t.na : '\u0648\u0642\u062a\u0634\u0647'); });
+                D.tasks.forEach(function (t) { if (t.al && t.tm && !t.d && !t.mv) add('t' + t.id, tsOf(k, t.tm), '\u23f0 ' + t.tm + ' \u00b7 ' + t.t, t.na ? '\u25b6\ufe0f ' + t.na : '\u0648\u0642\u062a\u0634\u0647', t.vc); });
                 D.sh.forEach(function (s, j) { if (s.al && s.s) add('s' + k + j, tsOf(k, s.s), '\ud83c\udfea \u0646\u0648\u0628\u062a ' + fa(j + 1) + ' \u0645\u063a\u0627\u0632\u0647', fa(s.s) + ' \u062a\u0627 ' + fa(s.e || '?')); });
               }
-              if (i < 2) rtFor(k).forEach(function (x) { if (x.r.al && !(D && D.rt[x.key])) add('r' + k + x.key, tsOf(k, x.tm), '\ud83d\udccc ' + x.r.n, '\u0633\u0627\u0639\u062a ' + fa(x.tm) + '\u060c \u0627\u0646\u062c\u0627\u0645\u0634 \u062f\u0627\u062f\u06cc \u062a\u06cc\u06a9 \u0628\u0632\u0646'); });
+              if (i < 2) rtFor(k).forEach(function (x) { if (x.r.al && !(D && D.rt[x.key])) add('r' + k + x.key, tsOf(k, x.tm), '\ud83d\udccc ' + x.r.n, '\u0633\u0627\u0639\u062a ' + fa(x.tm) + '\u060c \u0627\u0646\u062c\u0627\u0645\u0634 \u062f\u0627\u062f\u06cc \u062a\u06cc\u06a9 \u0628\u0632\u0646', x.r.vc); });
             })(addD(k0, i), i);
             return w;
           }
@@ -1241,12 +1935,12 @@ jobs:
             var w = want(), old = S.alm || {}, nw = {}, ch = false;
             Object.keys(old).forEach(function (id) { if (!w[id]) { try { Android.cancelAlarm(id); } catch (e) {} ch = true; } });
             Object.keys(w).forEach(function (id) {
-              var a = w[id], sig = a[0] + '|' + a[1] + '|' + a[2]; nw[id] = sig;
-              if (old[id] !== sig) { try { Android.alarm(id, String(a[0]), a[1], a[2]); } catch (e) {} ch = true; }
+              var a = w[id], sig = a[0] + '|' + a[1] + '|' + a[2] + '|' + a[3] + '|' + a[4]; nw[id] = sig;
+              if (old[id] !== sig) { try { if (a[4]) Android.ring(id, String(a[0]), a[1], a[2], a[3]); else Android.alarm(id, String(a[0]), a[1], a[2]); } catch (e) {} ch = true; }
             });
             S.alm = nw; if (ch) sv('life1', S);
           }
-          function testN() { try { Android.alarm('test', String(Date.now() + 10000), '\ud83e\uddea \u062a\u0633\u062a', '\u0622\u0644\u0627\u0631\u0645\u200c\u0647\u0627 \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0646 \u2705'); toast('\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u062f\u06cc\u06af\u0647 \u0646\u0648\u062a\u06cc\u0641 \u0645\u06cc\u0627\u062f'); } catch (e) { toast('\u0641\u0642\u0637 \u062a\u0648 \u0627\u067e \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647'); } }
+          function testN() { try { Android.ring('test', String(Date.now() + 10000), '\ud83e\uddea \u0622\u0644\u0627\u0631\u0645 \u0622\u0632\u0645\u0627\u06cc\u0634\u06cc', '\u0627\u06af\u0647 \u0627\u06cc\u0646\u0648 \u0645\u06cc\u200c\u0628\u06cc\u0646\u06cc \u0648 \u0635\u062f\u0627 \u0645\u06cc\u0627\u062f\u060c \u0622\u0644\u0627\u0631\u0645\u200c\u0647\u0627 \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0646 \u2705', ''); toast('\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u062f\u06cc\u06af\u0647 \u0622\u0644\u0627\u0631\u0645 \u0645\u06cc\u200c\u0632\u0646\u0647. \u06af\u0648\u0634\u06cc \u0631\u0648 \u0642\u0641\u0644 \u06a9\u0646 \u0648 \u0635\u0628\u0631 \u06a9\u0646'); } catch (e) { toast('\u0641\u0642\u0637 \u062a\u0648 \u0627\u067e \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647'); } }
 
           /* ---------- http + update ---------- */
           var CBS = {}, CBN = 0;
@@ -1272,6 +1966,328 @@ jobs:
             else { el.innerHTML = ''; if (manual) toast('\u0622\u062e\u0631\u06cc\u0646 \u0646\u0633\u062e\u0647 \u0631\u0648 \u062f\u0627\u0631\u06cc \u2705'); }
           }
           function getUpd() { var u = ld('upd', null); if (!u) return; try { Android.openUrl(u.url); toast('\u0628\u0639\u062f \u0627\u0632 \u062f\u0627\u0646\u0644\u0648\u062f\u060c \u0641\u0627\u06cc\u0644 \u0631\u0648 \u0628\u0627\u0632 \u06a9\u0646 \u0648 \u00ab\u0628\u0647\u200c\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc\u00bb \u0631\u0648 \u0628\u0632\u0646'); } catch (e) { toast('\u0645\u0631\u0648\u0631\u06af\u0631 \u0628\u0627\u0632 \u0646\u0634\u062f'); } }
+
+          /* ---------- voice (recording) ---------- */
+          var VC = null, REC = null;
+          function vcHas(id) { try { return Android.hasVoice(id) == '1'; } catch (e) { return false; } }
+          function vcInit(id, cur) { VC = { id: id, has: !!cur && vcHas(id) }; }
+          function vcBox() {
+            if (!VC) return '';
+            var h = '<div id="vcbox" class="vcb">';
+            if (REC) h += '<b style="color:#FF7B7B">\ud83d\udd34 \u062f\u0631 \u062d\u0627\u0644 \u0636\u0628\u0637... ' + fa(Math.min(10, Math.floor((Date.now() - REC.t0) / 1000))) + ' / \u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647</b> <button class="btn r s" onclick="recStop()">\u23f9 \u062a\u0648\u0642\u0641</button>';
+            else if (VC.has) h += '<span>\ud83c\udf99 \u0635\u062f\u0627\u06cc \u0622\u0644\u0627\u0631\u0645 \u0636\u0628\u0637 \u0634\u062f\u0647</span> <button class="btn g s" onclick="vcPlay()">\u25b6\ufe0f \u067e\u062e\u0634</button> <button class="btn g s" onclick="recStart()">\ud83c\udf99 \u062f\u0648\u0628\u0627\u0631\u0647</button> <button class="btn g s" onclick="vcDel()">\ud83d\uddd1</button>';
+            else h += '<button class="btn g s" onclick="recStart()">\ud83c\udf99 \u0636\u0628\u0637 \u0635\u062f\u0627\u06cc \u0622\u0644\u0627\u0631\u0645 (\u062d\u062f\u0627\u06a9\u062b\u0631 \u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647)</button><div class="mut sm">\u0628\u062f\u0648\u0646 \u0635\u062f\u0627\u060c \u0632\u0646\u06af \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 \u0622\u0644\u0627\u0631\u0645 \u06af\u0648\u0634\u06cc \u067e\u062e\u0634 \u0645\u06cc\u0634\u0647.</div>';
+            return h + '</div>';
+          }
+          function vcRef() { var el = $('vcbox'); if (el) el.outerHTML = vcBox(); }
+          function recStart() {
+            var r = ''; try { r = Android.recStart(VC.id); } catch (e) { toast('\u0641\u0642\u0637 \u062a\u0648 \u0627\u067e \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647'); return; }
+            if (r == 'perm') { toast('\u0627\u062c\u0627\u0632\u0647 \u0645\u06cc\u06a9\u0631\u0648\u0641\u0648\u0646 \u0631\u0648 \u0628\u062f\u0647 \u0648 \u062f\u0648\u0628\u0627\u0631\u0647 \u0628\u0632\u0646 \ud83c\udf99'); return; }
+            if (r != 'ok') { toast('\u0636\u0628\u0637 \u0634\u0631\u0648\u0639 \u0646\u0634\u062f'); return; }
+            REC = { t0: Date.now() }; vcRef();
+            REC.iv = setInterval(function () { if (REC) vcRef(); }, 500);
+          }
+          function recFinish(ms) { if (REC) clearInterval(REC.iv); REC = null; if (VC) { VC.has = ms > 300; vcRef(); } toast(ms > 300 ? '\u2705 ' + fa(Math.round(ms / 100) / 10) + ' \u062b\u0627\u0646\u06cc\u0647 \u0636\u0628\u0637 \u0634\u062f' : '\u0636\u0628\u0637 \u062e\u06cc\u0644\u06cc \u06a9\u0648\u062a\u0627\u0647 \u0628\u0648\u062f'); }
+          function recStop() { var ms = 0; try { ms = +Android.recStop(); } catch (e) {} recFinish(ms); }
+          window.recDone = function (ms) { recFinish(+ms); };
+          function vcPlay() { try { Android.playVoice(VC.id); } catch (e) {} }
+          function vcDel() { try { Android.delVoice(VC.id); } catch (e) {} VC.has = false; vcRef(); }
+          function vcEnd() { if (REC) recStop(); try { Android.stopVoice(); } catch (e) {} }
+
+          /* ---------- money & cards ---------- */
+          function numM(s) { var n = parseFloat(toEn(String(s == null ? '' : s).replace(/[,\u066c\u060c\s]/g, '')).replace(/[^\d.\-]/g, '')); return isNaN(n) ? 0 : n; }
+          function fmtN(n) { n = Math.round(n); var s = String(Math.abs(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u066c'); return (n < 0 ? '\u2212' : '') + fa(s); }
+          function digits(s) { return toEn(s).replace(/\D/g, ''); }
+          function card4(s) { var d = digits(s); return d.replace(/(\d{4})(?=\d)/g, '$1-'); }
+          var BINS = { '603799': '\u0645\u0644\u06cc', '589210': '\u0633\u067e\u0647', '627353': '\u062a\u062c\u0627\u0631\u062a', '585983': '\u062a\u062c\u0627\u0631\u062a', '610433': '\u0645\u0644\u062a', '991975': '\u0645\u0644\u062a', '603769': '\u0635\u0627\u062f\u0631\u0627\u062a', '627412': '\u0627\u0642\u062a\u0635\u0627\u062f \u0646\u0648\u06cc\u0646', '622106': '\u067e\u0627\u0631\u0633\u06cc\u0627\u0646', '627884': '\u067e\u0627\u0631\u0633\u06cc\u0627\u0646', '502229': '\u067e\u0627\u0633\u0627\u0631\u06af\u0627\u062f', '639347': '\u067e\u0627\u0633\u0627\u0631\u06af\u0627\u062f', '627488': '\u06a9\u0627\u0631\u0622\u0641\u0631\u06cc\u0646', '502910': '\u06a9\u0627\u0631\u0622\u0641\u0631\u06cc\u0646', '621986': '\u0633\u0627\u0645\u0627\u0646', '639346': '\u0633\u06cc\u0646\u0627', '639607': '\u0633\u0631\u0645\u0627\u06cc\u0647', '502806': '\u0634\u0647\u0631', '504706': '\u0634\u0647\u0631', '502938': '\u062f\u06cc', '603770': '\u06a9\u0634\u0627\u0648\u0631\u0632\u06cc', '639217': '\u06a9\u0634\u0627\u0648\u0631\u0632\u06cc', '628023': '\u0645\u0633\u06a9\u0646', '627760': '\u067e\u0633\u062a \u0628\u0627\u0646\u06a9', '627961': '\u0635\u0646\u0639\u062a \u0648 \u0645\u0639\u062f\u0646', '627648': '\u062a\u0648\u0633\u0639\u0647 \u0635\u0627\u062f\u0631\u0627\u062a', '636214': '\u0622\u06cc\u0646\u062f\u0647', '505785': '\u0627\u06cc\u0631\u0627\u0646 \u0632\u0645\u06cc\u0646', '504172': '\u0631\u0633\u0627\u0644\u062a', '606373': '\u0645\u0647\u0631 \u0627\u06cc\u0631\u0627\u0646', '589463': '\u0631\u0641\u0627\u0647', '502908': '\u062a\u0648\u0633\u0639\u0647 \u062a\u0639\u0627\u0648\u0646', '505801': '\u06a9\u0648\u062b\u0631', '507677': '\u0646\u0648\u0631', '628157': '\u062a\u0648\u0633\u0639\u0647', '505416': '\u06af\u0631\u062f\u0634\u06af\u0631\u06cc', '606256': '\u0645\u0644\u0644', '639370': '\u0645\u0647\u0631 \u0627\u0642\u062a\u0635\u0627\u062f', '636795': '\u0645\u0631\u06a9\u0632\u06cc', '585947': '\u062e\u0627\u0648\u0631\u0645\u06cc\u0627\u0646\u0647', '207177': '\u062a\u0648\u0633\u0639\u0647 \u0635\u0627\u062f\u0631\u0627\u062a' };
+          function bankOf(s) { return BINS[digits(s).substring(0, 6)] || ''; }
+          function luhn(s) { var d = digits(s); if (d.length != 16) return false; var sum = 0; for (var i = 0; i < 16; i++) { var x = +d.charAt(i); if (i % 2 == 0) { x *= 2; if (x > 9) x -= 9; } sum += x; } return sum % 10 == 0; }
+          function cpTxt(t, msg) { toast(setClip(t) ? (msg || '\ud83d\udccb \u06a9\u067e\u06cc \u0634\u062f') : '\u06a9\u067e\u06cc \u0646\u0634\u062f'); }
+          function ago(ts) { var d = Math.floor((Date.now() - ts) / 86400000); return d <= 0 ? '\u0627\u0645\u0631\u0648\u0632' : d == 1 ? '\u062f\u06cc\u0631\u0648\u0632' : fa(d) + ' \u0631\u0648\u0632 \u067e\u06cc\u0634'; }
+          function dtStr(ts) { return jStr(dk(ts)) + ' \u00b7 ' + fa(hmOf(ts)); }
+
+          /* ---------- people ---------- */
+          var CATS = { hi: ['\ud83d\udd25', '\u067e\u0631\u062f\u06cc\u062f\u0627\u0631', 7], mid: ['\ud83d\ude42', '\u0645\u0639\u0645\u0648\u0644\u06cc', 30], lo: ['\ud83c\udf19', '\u06a9\u0645\u200c\u062f\u06cc\u062f\u0627\u0631', 90] };
+          var LG = { gv: ['\ud83d\udce6', '\u062c\u0646\u0633 \u0628\u0631\u062f / \u0628\u0647\u0634 \u062f\u0627\u062f\u0645', 1], py: ['\ud83d\udcb8', '\u0628\u0647\u0634 \u067e\u0648\u0644 \u062f\u0627\u062f\u0645', 1], pd: ['\ud83d\udcb5', '\u067e\u0648\u0644 \u062f\u0627\u062f', -1], tk: ['\ud83d\udce5', '\u0627\u0632\u0634 \u062c\u0646\u0633 / \u067e\u0648\u0644 \u06af\u0631\u0641\u062a\u0645', -1] };
+          var PP = null, PSUB = 'info', PF = null, PQ = '', PCAT = '', PADD = '';
+          function pFind(id) { for (var i = 0; i < S.ppl.length; i++) if (S.ppl[i].id == id) return S.ppl[i]; return null; }
+          function pBal(p) { var b = 0; (p.lg || []).forEach(function (e) { b += (LG[e.ty] ? LG[e.ty][2] : 0) * numM(e.a); }); return b; }
+          function pLast(p) { var t = 0; (p.vs || []).forEach(function (v) { if (v.t > t) t = v.t; }); return t; }
+          function pAvg(p) { var v = p.vs || []; if (!v.length) return 0; var s = 0; v.forEach(function (x) { s += x.sc || 0; }); return s / v.length; }
+          function pDue(p) { var l = pLast(p), c = CATS[p.cat || 'mid']; if (!l) return false; return (Date.now() - l) / 86400000 > c[2]; }
+          function balTxt(b) { return b > 0 ? '<span style="color:#4ED38A">\u0637\u0644\u0628\u06a9\u0627\u0631\u0645 ' + fmtN(b) + '</span>' : b < 0 ? '<span style="color:#FF7B7B">\u0628\u062f\u0647\u06a9\u0627\u0631\u0645 ' + fmtN(-b) + '</span>' : '<span class="mut">\u062a\u0633\u0648\u06cc\u0647</span>'; }
+          function stars(n) { return '\u2605\u2605\u2605\u2605\u2605'.substring(0, n || 0) + '<span style="color:#3A4F6B">' + '\u2605\u2605\u2605\u2605\u2605'.substring(0, 5 - (n || 0)) + '</span>'; }
+          function rPpl() {
+            if (PP) return rPerson(pFind(PP));
+            var tb = 0, td = 0;
+            S.ppl.forEach(function (p) { var b = pBal(p); if (b > 0) tb += b; else td -= b; });
+            var h = '<div class="box"><div class="row"><span>\ud83d\udcb0 \u06a9\u0644 \u0637\u0644\u0628: <b style="color:#4ED38A">' + fmtN(tb) + '</b></span><span>\u06a9\u0644 \u0628\u062f\u0647\u06cc: <b style="color:#FF7B7B">' + fmtN(td) + '</b></span></div><div class="mut sm">\u062a\u0648\u0645\u0627\u0646</div></div>';
+            h += '<div class="box"><div class="row"><button class="btn s" onclick="pNew()">\u2795 \u0622\u062f\u0645 \u062c\u062f\u06cc\u062f</button><button class="btn g s" onclick="pPick()">\ud83d\udcc7 \u0627\u0632 \u0645\u062e\u0627\u0637\u0628\u06cc\u0646 \u06af\u0648\u0634\u06cc</button></div>' +
+              '<input placeholder="\ud83d\udd0d \u062c\u0633\u062a\u062c\u0648" value="' + esc(PQ) + '" oninput="PQ=this.value;pList()"><div class="chips">' +
+              '<span class="chip' + (!PCAT ? ' on' : '') + '" onclick="PCAT=\'\';render()">\u0647\u0645\u0647</span>' + Object.keys(CATS).map(function (c) { return '<span class="chip' + (PCAT == c ? ' on' : '') + '" onclick="PCAT=\'' + c + '\';render()">' + CATS[c][0] + ' ' + CATS[c][1] + '</span>'; }).join('') + '</div>';
+            if (PF && !PF.id) h += pForm();
+            h += '<div id="plist">' + pListH() + '</div></div>';
+            return h;
+          }
+          function pList() { var el = $('plist'); if (el) el.innerHTML = pListH(); }
+          function pListH() {
+            var q = trim(PQ), l = S.ppl.filter(function (p) { return (!PCAT || p.cat == PCAT) && (!q || (p.n + ' ' + (p.ph || []).join(' ')).indexOf(q) >= 0 || (p.n + ' ' + (p.ph || []).join(' ')).indexOf(toEn(q)) >= 0); });
+            var co = { hi: 0, mid: 1, lo: 2 };
+            l.sort(function (a, b) { return (co[a.cat] - co[b.cat]) || ((b.pr || 0) - (a.pr || 0)) || (a.n < b.n ? -1 : 1); });
+            if (!l.length) return '<div class="mut">' + (S.ppl.length ? '\u06a9\u0633\u06cc \u067e\u06cc\u062f\u0627 \u0646\u0634\u062f.' : '\u0647\u0646\u0648\u0632 \u06a9\u0633\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647.') + '</div>';
+            var h = '', last = '';
+            l.forEach(function (p) {
+              if (p.cat != last) { h += '<div class="dh" style="margin-top:6px">' + CATS[p.cat][0] + ' ' + CATS[p.cat][1] + '</div>'; last = p.cat; }
+              var lv = pLast(p), av = pAvg(p);
+              h += '<div class="task" onclick="pOpen(\'' + p.id + '\')"><div class="row"><b>' + esc(p.n) + '</b><span class="sm">' + balTxt(pBal(p)) + '</span></div>' +
+                '<div class="row mut sm"><span class="dots">' + stars(p.pr) + '</span><span>' + (lv ? '\ud83e\udd1d ' + ago(lv) : '\u062f\u06cc\u062f\u0627\u0631\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647') + (av ? ' \u00b7 \u0646\u0645\u0631\u0647 ' + fa(r1(av)) : '') + (pDue(p) ? ' <b style="color:#E0A040">\u23f0 \u0648\u0642\u062a \u062f\u06cc\u062f\u0627\u0631</b>' : '') + '</span></div></div>';
+            });
+            return h;
+          }
+          function pNew() { PF = { id: '', n: '', ph: [''], cards: [''], cat: 'mid', pr: 3, why: '' }; render(); }
+          function pPick() {
+            var id = 'c' + (++CBN);
+            CBS[id] = function (r) {
+              if (!r || !r.n) { toast('\u0645\u062e\u0627\u0637\u0628\u06cc \u0627\u0646\u062a\u062e\u0627\u0628 \u0646\u0634\u062f'); return; }
+              var ph = digits(r.ph || '');
+              var ex = S.ppl.filter(function (p) { return (p.ph || []).some(function (x) { return digits(x) && digits(x).slice(-10) == ph.slice(-10); }); })[0];
+              if (ex) { toast('\u0627\u06cc\u0646 \u0622\u062f\u0645 \u0642\u0628\u0644\u0627\u064b \u0647\u0633\u062a'); pOpen(ex.id); return; }
+              PF = { id: '', n: r.n, ph: [r.ph || ''], cards: [''], cat: 'mid', pr: 3, why: '' }; TAB = 'ppl'; PP = null; render();
+            };
+            try { Android.pickContact(id); } catch (e) { delete CBS[id]; toast('\u0641\u0642\u0637 \u062a\u0648 \u0627\u067e \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647'); }
+          }
+          function pForm() {
+            var x = PF, h = '<div class="box inn"><label>\u0627\u0633\u0645</label><input id="pfN" value="' + esc(x.n) + '">';
+            h += '<label>\u0634\u0645\u0627\u0631\u0647 \u0645\u0648\u0628\u0627\u06cc\u0644</label>';
+            x.ph.forEach(function (v, i) { h += '<input id="pfP' + i + '" inputmode="tel" style="direction:ltr" value="' + esc(v) + '">'; });
+            h += '<button class="btn g s" onclick="pfGrab();PF.ph.push(\'\');render()">\u2795 \u0634\u0645\u0627\u0631\u0647 \u062f\u06cc\u06af\u0647</button>';
+            h += '<label><br>\u0634\u0645\u0627\u0631\u0647 \u06a9\u0627\u0631\u062a (\u06f1\u06f6 \u0631\u0642\u0645)</label>';
+            x.cards.forEach(function (v, i) { h += '<input id="pfC' + i + '" inputmode="numeric" style="direction:ltr" value="' + esc(card4(v)) + '">'; });
+            h += '<button class="btn g s" onclick="pfGrab();PF.cards.push(\'\');render()">\u2795 \u06a9\u0627\u0631\u062a \u062f\u06cc\u06af\u0647</button>';
+            h += '<label><br>\u062f\u0633\u062a\u0647</label><div class="chips">' + Object.keys(CATS).map(function (c) { return '<span class="chip' + (x.cat == c ? ' on' : '') + '" onclick="pfGrab();PF.cat=\'' + c + '\';render()">' + CATS[c][0] + ' ' + CATS[c][1] + '</span>'; }).join('') + '</div>' +
+              '<label>\u0627\u0648\u0644\u0648\u06cc\u062a</label>' + chips(['', '\u062e\u06cc\u0644\u06cc \u06a9\u0645', '\u06a9\u0645', '\u0645\u062a\u0648\u0633\u0637', '\u0632\u06cc\u0627\u062f', '\u062e\u06cc\u0644\u06cc \u0632\u06cc\u0627\u062f'], 5, x.pr, 'pfPr') +
+              '<label>\u062f\u0644\u06cc\u0644 \u062f\u0633\u062a\u0647 \u0648 \u0627\u0648\u0644\u0648\u06cc\u062a</label><input id="pfW" value="' + esc(x.why) + '" placeholder="\u0645\u062b\u0644\u0627\u064b: \u0645\u0634\u062a\u0631\u06cc \u062b\u0627\u0628\u062a\u060c \u0647\u0641\u062a\u0647\u200c\u0627\u06cc \u062f\u0648 \u0628\u0627\u0631 \u062e\u0631\u06cc\u062f \u0645\u06cc\u200c\u06a9\u0646\u0647">' +
+              '<button class="btn" onclick="pfSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="PF=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' + (x.id ? ' <button class="btn r" onclick="pDel()">\ud83d\uddd1 \u062d\u0630\u0641</button>' : '') + '</div>';
+            return h;
+          }
+          function pfPr(n) { PF.pr = n; hiChip('pfPr', n); }
+          function pfGrab() {
+            if (!$('pfN')) return;
+            PF.n = $('pfN').value; PF.why = $('pfW').value;
+            for (var i = 0; i < PF.ph.length; i++) PF.ph[i] = $('pfP' + i).value;
+            for (var j = 0; j < PF.cards.length; j++) PF.cards[j] = $('pfC' + j).value;
+          }
+          function pfSave() {
+            pfGrab();
+            var n = trim(PF.n); if (!n) { toast('\u0627\u0633\u0645 \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
+            var cards = PF.cards.map(digits).filter(function (c) { return c.length; });
+            var bad = cards.filter(function (c) { return c.length != 16; });
+            if (bad.length) { toast('\u0634\u0645\u0627\u0631\u0647 \u06a9\u0627\u0631\u062a \u0628\u0627\u06cc\u062f \u06f1\u06f6 \u0631\u0642\u0645 \u0628\u0627\u0634\u0647'); return; }
+            var warn = cards.filter(function (c) { return !luhn(c); }).length;
+            var p = PF.id ? pFind(PF.id) : null;
+            if (!p) { p = { id: 'p' + uid(), cr: Date.now(), nt: [], vs: [], lg: [] }; S.ppl.push(p); }
+            p.n = n; p.ph = PF.ph.map(trim).filter(function (x) { return x; }); p.cards = cards; p.cat = PF.cat; p.pr = PF.pr; p.why = PF.why;
+            PF = null; PP = p.id; save(); render(); toast(warn ? '\u26a0\ufe0f \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f\u060c \u0648\u0644\u06cc \u06cc\u0647 \u0634\u0645\u0627\u0631\u0647 \u06a9\u0627\u0631\u062a \u062f\u0631\u0633\u062a \u0628\u0647 \u0646\u0638\u0631 \u0646\u0645\u06cc\u0627\u062f\u061b \u0686\u06a9\u0634 \u06a9\u0646' : '\u2705 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f');
+          }
+          function pDel() { var p = pFind(PF.id); if (!p || !confirm('\u00ab' + p.n + '\u00bb \u0628\u0627 \u0647\u0645\u0647 \u062f\u06cc\u062f\u0627\u0631\u0647\u0627\u060c \u06cc\u0627\u062f\u062f\u0627\u0634\u062a\u200c\u0647\u0627 \u0648 \u062d\u0633\u0627\u0628\u200c\u0647\u0627\u0634 \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f')) return; S.ppl = S.ppl.filter(function (x) { return x.id != p.id; }); PF = null; PP = null; save(); render(); }
+          function pOpen(id) { PP = id; PSUB = 'info'; PF = null; PADD = ''; TAB = 'ppl'; render(); window.scrollTo(0, 0); }
+          function rPerson(p) {
+            if (!p) { PP = null; return rPpl(); }
+            if (PF && PF.id == p.id) return '<div class="box"><button class="btn g s" onclick="PF=null;render()">\u2192 \u0628\u0631\u06af\u0634\u062a</button></div>' + pForm();
+            var b = pBal(p), c = CATS[p.cat || 'mid'];
+            var h = '<div class="box"><div class="row"><button class="btn g s" onclick="PP=null;render()">\u2192 \u0647\u0645\u0647</button><button class="btn g s" onclick="PF=JSON.parse(JSON.stringify(pFind(\'' + p.id + '\')));if(!PF.ph.length)PF.ph=[\'\'];if(!PF.cards.length)PF.cards=[\'\'];render()">\u270f\ufe0f \u0648\u06cc\u0631\u0627\u06cc\u0634</button></div>' +
+              '<div class="big" style="margin-top:6px">' + esc(p.n) + '</div><div class="row"><span>' + c[0] + ' ' + c[1] + ' \u00b7 <span class="dots">' + stars(p.pr) + '</span></span><span>' + balTxt(b) + '</span></div>' +
+              (p.why ? '<div class="mut sm">\u062f\u0644\u06cc\u0644: ' + esc(p.why) + '</div>' : '') + (pDue(p) ? '<div class="sm" style="color:#E0A040">\u23f0 \u0628\u06cc\u0634\u062a\u0631 \u0627\u0632 ' + fa(c[2]) + ' \u0631\u0648\u0632\u0647 \u0646\u062f\u06cc\u062f\u06cc\u0634</div>' : '') + '</div>';
+            var subs = [['info', '\ud83d\udcc7 \u0627\u0637\u0644\u0627\u0639\u0627\u062a'], ['vs', '\ud83e\udd1d \u062f\u06cc\u062f\u0627\u0631\u0647\u0627'], ['nt', '\ud83d\udcdd \u06cc\u0627\u062f\u062f\u0627\u0634\u062a'], ['lg', '\ud83d\udcb0 \u062d\u0633\u0627\u0628']];
+            h += '<div class="chips" style="margin:0 12px">' + subs.map(function (s) { return '<span class="chip' + (PSUB == s[0] ? ' on' : '') + '" onclick="PSUB=\'' + s[0] + '\';PADD=\'\';render()">' + s[1] + '</span>'; }).join('') + '</div>';
+            if (PSUB == 'info') {
+              h += '<div class="box"><h3>\ud83d\udcf1 \u0645\u0648\u0628\u0627\u06cc\u0644</h3>' + (p.ph.length ? p.ph.map(function (x) { return '<div class="row"><span style="direction:ltr">' + fa(x) + '</span><span><button class="btn s" onclick="Android.dial(\'' + esc(digits(x)) + '\')">\ud83d\udcde \u062a\u0645\u0627\u0633</button> <button class="btn g s" onclick="cpTxt(\'' + esc(digits(x)) + '\')">\ud83d\udccb</button></span></div>'; }).join('') : '<div class="mut">\u062b\u0628\u062a \u0646\u0634\u062f\u0647</div>') + '</div>';
+              h += '<div class="box"><h3>\ud83d\udcb3 \u0634\u0645\u0627\u0631\u0647 \u06a9\u0627\u0631\u062a</h3>' + (p.cards.length ? p.cards.map(function (x) { return '<div class="row"><span style="direction:ltr;font-size:16px">' + fa(card4(x)) + '</span><button class="btn g s" onclick="cpTxt(\'' + x + '\',\'\ud83d\udccb \u0634\u0645\u0627\u0631\u0647 \u06a9\u0627\u0631\u062a \u06a9\u067e\u06cc \u0634\u062f\')">\ud83d\udccb</button></div><div class="mut sm">' + (bankOf(x) ? '\ud83c\udfe6 ' + bankOf(x) : '') + (luhn(x) ? '' : ' \u26a0\ufe0f \u0645\u0645\u06a9\u0646\u0647 \u0627\u0634\u062a\u0628\u0627\u0647 \u0628\u0627\u0634\u0647') + '</div>'; }).join('') : '<div class="mut">\u062b\u0628\u062a \u0646\u0634\u062f\u0647</div>') + '</div>';
+              var vs = p.vs || [];
+              h += '<div class="box"><div class="row">' + cell('\u062f\u06cc\u062f\u0627\u0631', fa(vs.length)) + cell('\u0645\u06cc\u0627\u0646\u06af\u06cc\u0646 \u0646\u0645\u0631\u0647', vs.length ? fa(r1(pAvg(p))) : '\u2014') + cell('\u0622\u062e\u0631\u06cc\u0646', pLast(p) ? ago(pLast(p)) : '\u2014') + '</div></div>';
+            } else if (PSUB == 'vs') {
+              h += '<div class="box"><button class="btn s" onclick="PADD=\'vs\';render()">\u2795 \u062b\u0628\u062a \u062f\u06cc\u062f\u0627\u0631 (\u0627\u0644\u0627\u0646)</button>';
+              if (PADD == 'vs') h += '<div class="box inn"><label>\u0646\u0645\u0631\u0647 \u0627\u06cc\u0646 \u062f\u06cc\u062f\u0627\u0631 (\u06f1 \u062a\u0627 \u06f1\u06f0)</label><div class="chips">' + [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(function (i) { return '<span class="chip" id="vsc' + i + '" onclick="vsSc(' + i + ')">' + fa(i) + '</span>'; }).join('') + '</div><input type="hidden" id="vsS" value="0">' +
+                '<label>\u062f\u0644\u06cc\u0644 \u0646\u0645\u0631\u0647</label><input id="vsW" placeholder="\u0645\u062b\u0644\u0627\u064b: \u062e\u0648\u0634\u200c\u062d\u0633\u0627\u0628 \u0628\u0648\u062f\u060c \u0648\u0644\u06cc \u062f\u06cc\u0631 \u0627\u0648\u0645\u062f"><label>\u0686\u06cc \u0634\u062f\u061f (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><textarea id="vsX"></textarea>' +
+                '<button class="btn" onclick="vsSave(\'' + p.id + '\')">\ud83d\udcbe \u062b\u0628\u062a</button> <button class="btn g" onclick="PADD=\'\';render()">\u0627\u0646\u0635\u0631\u0627\u0641</button></div>';
+              h += (p.vs || []).slice().sort(function (a, b) { return b.t - a.t; }).map(function (v) {
+                return '<div class="task"><div class="row"><b>' + dtStr(v.t) + '</b><span class="big" style="font-size:18px;color:' + (v.sc >= 7 ? '#4ED38A' : v.sc >= 4 ? '#E0A040' : '#FF7B7B') + '">' + fa(v.sc) + '/\u06f1\u06f0</span></div>' + (v.why ? '<div class="sm">\u062f\u0644\u06cc\u0644: ' + esc(v.why) + '</div>' : '') + (v.x ? '<div class="mut sm">' + esc(v.x) + '</div>' : '') + '<div style="text-align:left"><span class="mut sm" onclick="pSubDel(\'' + p.id + '\',\'vs\',\'' + v.id + '\')">\ud83d\uddd1</span></div></div>';
+              }).join('') + ((p.vs || []).length ? '' : '<div class="mut">\u0647\u0646\u0648\u0632 \u062f\u06cc\u062f\u0627\u0631\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647.</div>') + '</div>';
+            } else if (PSUB == 'nt') {
+              h += '<div class="box"><label>\u06cc\u0627\u062f\u062f\u0627\u0634\u062a \u062c\u062f\u06cc\u062f (\u0633\u0627\u0639\u062a \u0648 \u062a\u0627\u0631\u06cc\u062e \u062e\u0648\u062f\u06a9\u0627\u0631)</label><textarea id="ntX"></textarea><button class="btn s" onclick="ntSave(\'' + p.id + '\')">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button>';
+              h += (p.nt || []).slice().sort(function (a, b) { return b.t - a.t; }).map(function (n) { return '<div class="task"><div class="mut sm">' + dtStr(n.t) + ' <span onclick="pSubDel(\'' + p.id + '\',\'nt\',\'' + n.id + '\')">\ud83d\uddd1</span></div><div style="white-space:pre-wrap">' + esc(n.x) + '</div></div>'; }).join('') + '</div>';
+            } else {
+              h += rLedger(p);
+            }
+            return h;
+          }
+          function vsSc(i) { $('vsS').value = i; for (var j = 1; j <= 10; j++) $('vsc' + j).className = 'chip' + (j == i ? ' on' : ''); }
+          function vsSave(pid) {
+            var p = pFind(pid), sc = +$('vsS').value, why = trim($('vsW').value);
+            if (!sc) { toast('\u0646\u0645\u0631\u0647 \u0631\u0648 \u0628\u0632\u0646'); return; }
+            if (!why) { toast('\u062f\u0644\u06cc\u0644 \u0646\u0645\u0631\u0647 \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
+            p.vs.push({ id: uid(), t: Date.now(), sc: sc, why: why, x: trim($('vsX').value) }); PADD = ''; save(); render(); toast('\u2705 \u062f\u06cc\u062f\u0627\u0631 \u062b\u0628\u062a \u0634\u062f');
+          }
+          function ntSave(pid) { var x = trim($('ntX').value); if (!x) { toast('\u0686\u06cc\u0632\u06cc \u0646\u0646\u0648\u0634\u062a\u06cc'); return; } pFind(pid).nt.push({ id: uid(), t: Date.now(), x: x }); save(); render(); toast('\u2705 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f'); }
+          function pSubDel(pid, f, id) { if (!confirm('\u067e\u0627\u06a9 \u0628\u0634\u0647\u061f')) return; var p = pFind(pid); p[f] = p[f].filter(function (x) { return x.id != id; }); save(); render(); }
+          function rLedger(p) {
+            var h = '<div class="box"><div class="row"><b>\u0645\u0627\u0646\u062f\u0647: ' + balTxt(pBal(p)) + '</b><button class="btn s" onclick="PADD=\'lg\';render()">\u2795 \u0631\u062f\u06cc\u0641 \u062c\u062f\u06cc\u062f</button></div>';
+            if (PADD == 'lg') {
+              h += '<div class="box inn"><label>\u0646\u0648\u0639</label><div class="chips">' + Object.keys(LG).map(function (k) { return '<span class="chip" id="lgt' + k + '" onclick="lgTy(\'' + k + '\')">' + LG[k][0] + ' ' + LG[k][1] + '</span>'; }).join('') + '</div><input type="hidden" id="lgT" value="">' +
+                '<label>\u0634\u0631\u062d / \u06a9\u0627\u0644\u0627</label><input id="lgI" placeholder="\u0645\u062b\u0644\u0627\u064b: \u0631\u0648\u063a\u0646 \u06f1.\u06f5 \u0644\u06cc\u062a\u0631\u06cc">' +
+                '<div class="row"><div class="f1"><label>\u062a\u0639\u062f\u0627\u062f</label><input id="lgQ" inputmode="decimal" oninput="lgCalc()"></div><div class="f1"><label>\u0642\u06cc\u0645\u062a \u0648\u0627\u062d\u062f (\u062a\u0648\u0645\u0627\u0646)</label><input id="lgU" inputmode="numeric" oninput="lgCalc()"></div></div>' +
+                '<label>\u0645\u0628\u0644\u063a \u06a9\u0644 (\u062a\u0648\u0645\u0627\u0646)</label><input id="lgA" inputmode="numeric" oninput="lgShow()"><div class="mut sm" id="lgAv"></div>' +
+                '<label>\u062a\u0648\u0636\u06cc\u062d (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="lgX">' +
+                '<button class="btn" onclick="lgSave(\'' + p.id + '\')">\ud83d\udcbe \u062b\u0628\u062a</button> <button class="btn g" onclick="PADD=\'\';render()">\u0627\u0646\u0635\u0631\u0627\u0641</button></div>';
+            }
+            var l = (p.lg || []).slice().sort(function (a, b) { return a.t - b.t; }), run = 0, rows = [];
+            l.forEach(function (e) { var s = LG[e.ty] ? LG[e.ty][2] : 0; run += s * numM(e.a); rows.push([e, s, run]); });
+            if (!rows.length) h += '<div class="mut">\u0647\u0646\u0648\u0632 \u0631\u062f\u06cc\u0641\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647.</div>';
+            else {
+              h += '<table><tr><th>\u062a\u0627\u0631\u06cc\u062e</th><th>\u0634\u0631\u062d</th><th>\u0628\u062f\u0647\u06a9\u0627\u0631</th><th>\u0628\u0633\u062a\u0627\u0646\u06a9\u0627\u0631</th><th>\u0645\u0627\u0646\u062f\u0647</th><th></th></tr>';
+              rows.reverse().forEach(function (r) {
+                var e = r[0];
+                h += '<tr><td class="sm">' + jStr(dk(e.t)) + '<br>' + fa(hmOf(e.t)) + '</td><td class="sm" style="text-align:right">' + LG[e.ty][0] + ' ' + esc(e.it || LG[e.ty][1]) + (numM(e.q) ? '<br><span class="mut">' + fa(numM(e.q)) + ' \u00d7 ' + fmtN(numM(e.u)) + '</span>' : '') + (e.x ? '<br><span class="mut">' + esc(e.x) + '</span>' : '') + '</td>' +
+                  '<td style="color:#4ED38A">' + (r[1] > 0 ? fmtN(numM(e.a)) : '') + '</td><td style="color:#FF7B7B">' + (r[1] < 0 ? fmtN(numM(e.a)) : '') + '</td><td class="sm">' + fmtN(r[2]) + '</td><td><span onclick="pSubDel(\'' + p.id + '\',\'lg\',\'' + e.id + '\')">\ud83d\uddd1</span></td></tr>';
+              });
+              h += '</table><div class="mut sm">\u0628\u062f\u0647\u06a9\u0627\u0631 = \u0627\u0648\u0646 \u0628\u0647 \u0645\u0646 \u0628\u062f\u0647\u06a9\u0627\u0631 \u0634\u062f (\u062c\u0646\u0633 \u0628\u0631\u062f \u06cc\u0627 \u0628\u0647\u0634 \u067e\u0648\u0644 \u062f\u0627\u062f\u0645). \u0628\u0633\u062a\u0627\u0646\u06a9\u0627\u0631 = \u0627\u0648\u0646 \u067e\u0631\u062f\u0627\u062e\u062a \u06a9\u0631\u062f \u06cc\u0627 \u0645\u0646 \u0627\u0632\u0634 \u06af\u0631\u0641\u062a\u0645. \u0645\u0627\u0646\u062f\u0647 \u0645\u062b\u0628\u062a \u06cc\u0639\u0646\u06cc \u0637\u0644\u0628\u06a9\u0627\u0631\u0645.</div>';
+            }
+            return h + '<button class="btn g s" onclick="cpTxt(lgText(\'' + p.id + '\'),\'\ud83d\udccb \u0635\u0648\u0631\u062a\u200c\u062d\u0633\u0627\u0628 \u06a9\u067e\u06cc \u0634\u062f\')">\ud83d\udccb \u06a9\u067e\u06cc \u0635\u0648\u0631\u062a\u200c\u062d\u0633\u0627\u0628</button></div>';
+          }
+          function lgTy(k) { $('lgT').value = k; Object.keys(LG).forEach(function (z) { $('lgt' + z).className = 'chip' + (z == k ? ' on' : ''); }); }
+          function lgCalc() { var q = num($('lgQ').value), u = numM($('lgU').value); if (q && u) { $('lgA').value = String(Math.round(q * u)); lgShow(); } }
+          function lgShow() { var a = numM($('lgA').value); $('lgAv').textContent = a ? fmtN(a) + ' \u062a\u0648\u0645\u0627\u0646' : ''; }
+          function lgSave(pid) {
+            var ty = $('lgT').value, a = numM($('lgA').value);
+            if (!ty) { toast('\u0646\u0648\u0639 \u0631\u062f\u06cc\u0641 \u0631\u0648 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646'); return; }
+            if (!a) { toast('\u0645\u0628\u0644\u063a \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
+            pFind(pid).lg.push({ id: uid(), t: Date.now(), ty: ty, it: trim($('lgI').value), q: $('lgQ').value, u: $('lgU').value, a: a, x: trim($('lgX').value) });
+            PADD = ''; save(); render(); toast('\u2705 \u062b\u0628\u062a \u0634\u062f');
+          }
+          function lgText(pid) {
+            var p = pFind(pid), run = 0, s = '\u0635\u0648\u0631\u062a\u200c\u062d\u0633\u0627\u0628 ' + p.n + '\n';
+            (p.lg || []).slice().sort(function (a, b) { return a.t - b.t; }).forEach(function (e) { run += LG[e.ty][2] * numM(e.a); s += jStr(dk(e.t)) + ' | ' + (e.it || LG[e.ty][1]) + (numM(e.q) ? ' (' + numM(e.q) + ' \u00d7 ' + fmtN(numM(e.u)) + ')' : '') + ' | ' + (LG[e.ty][2] > 0 ? '+' : '\u2212') + fmtN(numM(e.a)) + ' | \u0645\u0627\u0646\u062f\u0647 ' + fmtN(run) + '\n'; });
+            return s + '\u062c\u0645\u0639: ' + (run > 0 ? '\u0628\u062f\u0647\u06cc \u0634\u0645\u0627 ' + fmtN(run) : run < 0 ? '\u0637\u0644\u0628 \u0634\u0645\u0627 ' + fmtN(-run) : '\u062a\u0633\u0648\u06cc\u0647') + ' \u062a\u0648\u0645\u0627\u0646';
+          }
+
+          /* ---------- needs & daily sites ---------- */
+          var NF = null, NSEC = '', NSITE = '', NDONE = false, SED = null;
+          function siteOf(id) { for (var i = 0; i < S.sites.length; i++) if (S.sites[i].id == id) return S.sites[i]; return null; }
+          function secOf(id) { for (var i = 0; i < S.secs.length; i++) if (S.secs[i].id == id) return S.secs[i]; return { id: id, n: '\u2754 ' + id }; }
+          function ndOpen(sid) { return S.nd.filter(function (n) { return !n.d && n.site == sid; }).length; }
+          function rSites(D, k, full) {
+            var isT = k == dk(), done = S.sites.filter(function (s) { return D.st && D.st[s.id]; }).length;
+            var h = '<div class="box' + (isT && done < S.sites.length ? ' warn' : '') + '"><div class="row"><h3>\ud83c\udf10 \u0633\u0627\u06cc\u062a\u200c\u0647\u0627\u06cc \u0648\u0627\u062c\u0628 \u0631\u0648\u0632\u0627\u0646\u0647</h3><span class="mut sm">' + fa(done) + ' \u0627\u0632 ' + fa(S.sites.length) + '</span></div>';
+            S.sites.forEach(function (s) {
+              var ok = D.st && D.st[s.id], n = ndOpen(s.id);
+              h += '<div class="task' + (ok ? ' done' : '') + '"><div class="row" style="flex-wrap:nowrap"><span class="ck' + (ok ? ' on' : '') + '" onclick="stTgl(\'' + s.id + '\')">' + (ok ? '\u2713' : '') + '</span><div class="tt f1"><b>' + esc(s.n) + '</b>' + (ok ? '<span class="mut sm"> \u00b7 ' + fa(hmOf(D.st[s.id])) + '</span>' : '') +
+                (n ? ' <span class="tm" onclick="NSITE=\'' + s.id + '\';NSEC=\'\';go(\'need\')">\ud83d\uded2 ' + fa(n) + ' \u0646\u06cc\u0627\u0632</span>' : '') + '</div><button class="btn s" onclick="stOpen(\'' + s.id + '\')">\u2197\ufe0f \u0628\u0627\u0632 \u06a9\u0646</button></div></div>';
+            });
+            return h + '<div class="mut sm">\u00ab\u0628\u0627\u0632 \u06a9\u0646\u00bb \u062e\u0648\u062f\u0634 \u062a\u06cc\u06a9 \u0645\u06cc\u200c\u0632\u0646\u0647. \u0627\u06af\u0647 \u0627\u067e\u0634 \u0646\u0635\u0628 \u0628\u0627\u0634\u0647\u060c \u0627\u067e \u0628\u0627\u0632 \u0645\u06cc\u0634\u0647.</div></div>';
+          }
+          function stTgl(id) { var D = day(SEL); if (!D.st) D.st = {}; if (D.st[id]) delete D.st[id]; else D.st[id] = Date.now(); save(); render(); }
+          function stOpen(id) {
+            var s = siteOf(id), r = ''; try { r = Android.openApp(s.p || '', s.u || ''); } catch (e) { r = ''; }
+            if (!r) { toast('\u0628\u0627\u0632 \u0646\u0634\u062f\u061b \u0622\u062f\u0631\u0633 \u06cc\u0627 \u0627\u067e \u0631\u0648 \u062a\u0648 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u0686\u06a9 \u06a9\u0646'); return; }
+            var D = day(dk()); if (!D.st) D.st = {}; if (!D.st[id]) D.st[id] = Date.now(); save(); render();
+          }
+          function rNeed() {
+            var h = rSites(day(dk()), dk(), true);
+            var open = S.nd.filter(function (n) { return !n.d; });
+            h += '<div class="box"><div class="row"><h3>\ud83d\uded2 \u0646\u06cc\u0627\u0632\u0647\u0627</h3><button class="btn s" onclick="NF={id:\'\',t:\'\',sec:NSEC||\'shop\',site:NSITE||\'\',q:\'\',x:\'\',pr:2};render()">\u2795 \u0646\u06cc\u0627\u0632 \u062c\u062f\u06cc\u062f</button></div>' +
+              '<div class="chips"><span class="chip' + (!NSEC ? ' on' : '') + '" onclick="NSEC=\'\';render()">\u0647\u0645\u0647 (' + fa(open.length) + ')</span>' +
+              S.secs.map(function (s) { var c = open.filter(function (n) { return n.sec == s.id; }).length; return '<span class="chip' + (NSEC == s.id ? ' on' : '') + '" onclick="NSEC=\'' + s.id + '\';render()">' + esc(s.n) + ' (' + fa(c) + ')</span>'; }).join('') +
+              '<span class="chip" onclick="secAdd()">\u2795 \u0628\u062e\u0634</span></div>' +
+              '<div class="chips"><span class="chip' + (!NSITE ? ' on' : '') + '" onclick="NSITE=\'\';render()">\u0647\u0631 \u062c\u0627</span>' + S.sites.map(function (s) { return '<span class="chip' + (NSITE == s.id ? ' on' : '') + '" onclick="NSITE=\'' + s.id + '\';render()">' + esc(s.n) + '</span>'; }).join('') + '<span class="chip' + (NSITE == '-' ? ' on' : '') + '" onclick="NSITE=\'-\';render()">\u0628\u062f\u0648\u0646 \u0633\u0627\u06cc\u062a</span></div>';
+            if (NF && !NF.id) h += nForm();
+            var l = S.nd.filter(function (n) { return (!NSEC || n.sec == NSEC) && (!NSITE || (NSITE == '-' ? !n.site : n.site == NSITE)); });
+            var op = l.filter(function (n) { return !n.d; }).sort(function (a, b) { return (b.pr - a.pr) || (a.cr - b.cr); }), dn = l.filter(function (n) { return n.d; }).sort(function (a, b) { return b.d - a.d; });
+            if (!op.length && !(NF && !NF.id)) h += '<div class="mut">\u0646\u06cc\u0627\u0632 \u0628\u0627\u0632\u06cc \u0646\u06cc\u0633\u062a \ud83d\udc4c</div>';
+            var last = '';
+            op.forEach(function (n) {
+              if (!NSEC && n.sec != last) { h += '<div class="dh" style="margin-top:6px">' + esc(secOf(n.sec).n) + '</div>'; last = n.sec; }
+              h += NF && NF.id == n.id ? nForm() : nRow(n);
+            });
+            if (dn.length) {
+              h += '<div style="margin-top:8px"><span class="chip" onclick="NDONE=!NDONE;render()">\u2705 \u062e\u0631\u06cc\u062f\u0647\u200c\u0634\u062f\u0647 (' + fa(dn.length) + ') ' + (NDONE ? '\u25b2' : '\u25bc') + '</span></div>';
+              if (NDONE) dn.slice(0, 60).forEach(function (n) { h += nRow(n); });
+            }
+            return h + '</div>';
+          }
+          var NPR = ['', '\ud83d\udfe2 \u06a9\u0645', '\ud83d\udfe1 \u0645\u0639\u0645\u0648\u0644\u06cc', '\ud83d\udd34 \u0641\u0648\u0631\u06cc'];
+          function nRow(n) {
+            var s = siteOf(n.site);
+            return '<div class="task' + (n.d ? ' done' : '') + '"><div class="row" style="flex-wrap:nowrap"><span class="ck' + (n.d ? ' on' : '') + '" onclick="nTgl(\'' + n.id + '\')">' + (n.d ? '\u2713' : '') + '</span>' +
+              '<div class="tt f1" onclick="NF=JSON.parse(JSON.stringify(ndFind(\'' + n.id + '\')));render()"><b>' + esc(n.t) + '</b>' + (n.q ? ' <span class="tm">' + esc(fa(n.q)) + '</span>' : '') + '<br><span class="sm">' + NPR[n.pr || 2] + '</span>' + (s ? ' <span class="mut sm">\u00b7 ' + esc(s.n) + '</span>' : '') +
+              (n.d ? '<span class="mut sm"> \u00b7 \u062e\u0631\u06cc\u062f ' + jStr(dk(n.d)) + '</span>' : '') + (n.x ? '<div class="mut sm">' + esc(n.x) + '</div>' : '') + '</div>' + (s && !n.d ? '<button class="btn g s" onclick="stOpen(\'' + s.id + '\')">\u2197\ufe0f</button>' : '') + '</div></div>';
+          }
+          function ndFind(id) { for (var i = 0; i < S.nd.length; i++) if (S.nd[i].id == id) return S.nd[i]; return null; }
+          function nForm() {
+            var x = NF;
+            return '<div class="box inn"><label>\u0686\u06cc \u0644\u0627\u0632\u0645\u0647\u061f</label><input id="nfT" value="' + esc(x.t) + '"><div class="row"><div class="f1"><label>\u062a\u0639\u062f\u0627\u062f / \u0645\u0642\u062f\u0627\u0631</label><input id="nfQ" value="' + esc(x.q) + '"></div></div>' +
+              '<label>\u0628\u062e\u0634</label><div class="chips">' + S.secs.map(function (s) { return '<span class="chip' + (x.sec == s.id ? ' on' : '') + '" onclick="nfGrab();NF.sec=\'' + s.id + '\';render()">' + esc(s.n) + '</span>'; }).join('') + '</div>' +
+              '<label>\u0627\u0632 \u06a9\u062c\u0627\u061f</label><div class="chips"><span class="chip' + (!x.site ? ' on' : '') + '" onclick="nfGrab();NF.site=\'\';render()">\u0641\u0631\u0642\u06cc \u0646\u062f\u0627\u0631\u0647</span>' + S.sites.map(function (s) { return '<span class="chip' + (x.site == s.id ? ' on' : '') + '" onclick="nfGrab();NF.site=\'' + s.id + '\';render()">' + esc(s.n) + '</span>'; }).join('') + '</div>' +
+              '<label>\u0627\u0648\u0644\u0648\u06cc\u062a</label><div class="chips">' + [3, 2, 1].map(function (i) { return '<span class="chip' + (x.pr == i ? ' on' : '') + '" onclick="nfGrab();NF.pr=' + i + ';render()">' + NPR[i] + '</span>'; }).join('') + '</div>' +
+              '<label>\u06cc\u0627\u062f\u062f\u0627\u0634\u062a (\u0628\u0631\u0646\u062f\u060c \u0642\u06cc\u0645\u062a \u062f\u06cc\u062f\u0647\u200c\u0634\u062f\u0647\u060c ...)</label><input id="nfX" value="' + esc(x.x) + '">' +
+              '<button class="btn" onclick="nfSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="NF=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' + (x.id ? ' <button class="btn r" onclick="nDel()">\ud83d\uddd1</button>' : '') + '</div>';
+          }
+          function nfGrab() { if (!$('nfT')) return; NF.t = $('nfT').value; NF.q = $('nfQ').value; NF.x = $('nfX').value; }
+          function nfSave() {
+            nfGrab(); if (!trim(NF.t)) { toast('\u0628\u0646\u0648\u06cc\u0633 \u0686\u06cc \u0644\u0627\u0632\u0645\u0647'); return; }
+            var n = NF.id ? ndFind(NF.id) : null;
+            if (!n) { n = { id: 'n' + uid(), cr: Date.now(), d: 0 }; S.nd.push(n); }
+            n.t = trim(NF.t); n.q = trim(NF.q); n.x = trim(NF.x); n.sec = NF.sec; n.site = NF.site; n.pr = NF.pr;
+            var again = !NF.id; NF = again ? { id: '', t: '', sec: n.sec, site: n.site, q: '', x: '', pr: 2 } : null; save(); render(); toast('\u2705 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f' + (again ? '\u061b \u0628\u0639\u062f\u06cc \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633' : ''));
+            if (again) setTimeout(function () { var e = $('nfT'); if (e) e.focus(); }, 50);
+          }
+          function nDel() { if (!confirm('\u067e\u0627\u06a9 \u0628\u0634\u0647\u061f')) return; var id = NF.id; S.nd = S.nd.filter(function (n) { return n.id != id; }); NF = null; save(); render(); }
+          function nTgl(id) { var n = ndFind(id); n.d = n.d ? 0 : Date.now(); save(); render(); if (n.d) toast('\u2705 \u062e\u0631\u06cc\u062f\u0647 \u0634\u062f'); }
+          function secAdd() { var n = prompt('\u0627\u0633\u0645 \u0628\u062e\u0634 \u062c\u062f\u06cc\u062f (\u0645\u06cc\u200c\u062a\u0648\u0646\u06cc \u0627\u06cc\u0645\u0648\u062c\u06cc \u0647\u0645 \u0628\u0630\u0627\u0631\u06cc):', ''); n = trim(n); if (!n) return; S.secs.push({ id: 's' + uid(), n: n }); save(); render(); }
+
+          /* ---------- settings: sites, sections, permissions ---------- */
+          function rSiteEdit() {
+            var h = '<div class="box"><h3>\ud83c\udf10 \u0633\u0627\u06cc\u062a\u200c\u0647\u0627\u06cc \u0631\u0648\u0632\u0627\u0646\u0647</h3><div class="mut sm">\u0628\u0631\u0627\u06cc \u0647\u0631 \u06a9\u062f\u0648\u0645 \u0645\u06cc\u200c\u062a\u0648\u0646\u06cc \u0622\u062f\u0631\u0633 \u0633\u0627\u06cc\u062a \u06cc\u0627 \u0627\u067e \u0646\u0635\u0628\u200c\u0634\u062f\u0647 \u0631\u0648 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646\u06cc.</div>';
+            S.sites.forEach(function (s, i) {
+              if (SED && SED.i == i) {
+                h += '<div class="box inn"><label>\u0627\u0633\u0645</label><input id="seN" value="' + esc(s.n) + '"><label>\u0622\u062f\u0631\u0633 \u0633\u0627\u06cc\u062a</label><input id="seU" style="direction:ltr" value="' + esc(s.u) + '">' +
+                  '<label>\u0627\u067e</label><div class="mut sm">' + (s.p ? esc(s.pn || s.p) : '\u0627\u0646\u062a\u062e\u0627\u0628 \u0646\u0634\u062f\u0647 (\u0633\u0627\u06cc\u062a \u0628\u0627\u0632 \u0645\u06cc\u0634\u0647)') + '</div><button class="btn g s" onclick="seApps()">\ud83d\udcf1 \u0627\u0646\u062a\u062e\u0627\u0628 \u0627\u067e \u0646\u0635\u0628\u200c\u0634\u062f\u0647</button>' + (s.p ? ' <button class="btn g s" onclick="S.sites[' + i + '].p=\'\';save();render()">\u2715 \u0628\u062f\u0648\u0646 \u0627\u067e</button>' : '') +
+                  '<div id="seAp"></div><button class="btn" onclick="seSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="SED=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' + (S.sites.length > 1 ? ' <button class="btn r" onclick="seDel()">\ud83d\uddd1</button>' : '') + '</div>';
+              } else h += '<div class="task" onclick="SED={i:' + i + '};render()"><b>' + esc(s.n) + '</b><div class="mut sm" style="direction:ltr;text-align:right">' + esc(s.u) + (s.p ? ' \u00b7 \ud83d\udcf1 ' + esc(s.pn || s.p) : '') + '</div></div>';
+            });
+            return h + '<button class="btn g s" onclick="S.sites.push({id:\'w\'+uid(),n:\'\u0633\u0627\u06cc\u062a \u062c\u062f\u06cc\u062f\',u:\'https://\',p:\'\'});SED={i:S.sites.length-1};save();render()">\u2795 \u0633\u0627\u06cc\u062a</button></div>';
+          }
+          function seGrab() { var s = S.sites[SED.i]; if ($('seN')) { s.n = trim($('seN').value) || s.n; s.u = trim($('seU').value); } }
+          function seSave() { seGrab(); SED = null; save(); render(); toast('\u2705 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f'); }
+          function seDel() { if (!confirm('\u0627\u06cc\u0646 \u0633\u0627\u06cc\u062a \u062d\u0630\u0641 \u0628\u0634\u0647\u061f')) return; S.sites.splice(SED.i, 1); SED = null; save(); render(); }
+          function seApps() {
+            seGrab(); var l = []; try { l = JSON.parse(Android.apps()); } catch (e) {}
+            l.sort(function (a, b) { return a.n < b.n ? -1 : 1; });
+            SED.apps = l; seAppsShow('');
+          }
+          function seAppsShow(q) {
+            var l = SED.apps.filter(function (a) { return !q || (a.n + a.p).toLowerCase().indexOf(q.toLowerCase()) >= 0; });
+            $('seAp').innerHTML = '<input placeholder="\ud83d\udd0d \u0627\u0633\u0645 \u0627\u067e" oninput="seAppsShow(this.value)" id="seQ" value="' + esc(q) + '">' + l.slice(0, 40).map(function (a, i) { return '<div class="task" onclick="seApp(' + i + ')">' + esc(a.n) + ' <span class="mut sm">' + esc(a.p) + '</span></div>'; }).join('');
+            SED.fl = l.slice(0, 40);
+            var e = $('seQ'); if (e && q) { e.focus(); }
+          }
+          function seApp(i) { var a = SED.fl[i], s = S.sites[SED.i]; s.p = a.p; s.pn = a.n; save(); render(); toast('\ud83d\udcf1 ' + a.n); }
+          function rSecEdit() {
+            return '<div class="box"><h3>\ud83d\uddc2 \u0628\u062e\u0634\u200c\u0647\u0627\u06cc \u0646\u06cc\u0627\u0632\u0647\u0627</h3>' + S.secs.map(function (s, i) { return '<div class="row task"><span>' + esc(s.n) + '</span><span><button class="btn g s" onclick="secRen(' + i + ')">\u270f\ufe0f</button>' + (S.secs.length > 1 ? ' <button class="btn g s" onclick="secDel(' + i + ')">\ud83d\uddd1</button>' : '') + '</span></div>'; }).join('') + '<button class="btn g s" onclick="secAdd()">\u2795 \u0628\u062e\u0634</button></div>';
+          }
+          function secRen(i) { var n = trim(prompt('\u0627\u0633\u0645 \u062c\u062f\u06cc\u062f:', S.secs[i].n)); if (!n) return; S.secs[i].n = n; save(); render(); }
+          function secDel(i) { var s = S.secs[i], c = S.nd.filter(function (n) { return n.sec == s.id && !n.d; }).length; if (!confirm('\u0628\u062e\u0634 \u00ab' + s.n + '\u00bb \u062d\u0630\u0641 \u0628\u0634\u0647\u061f' + (c ? '\n' + fa(c) + ' \u0646\u06cc\u0627\u0632 \u0628\u0627\u0632\u0634 \u0645\u06cc\u0631\u0647 \u0628\u062e\u0634 \u00ab' + S.secs[i == 0 ? 1 : 0].n + '\u00bb.' : ''))) return; var to = S.secs[i == 0 ? 1 : 0].id; S.nd.forEach(function (n) { if (n.sec == s.id) n.sec = to; }); S.secs.splice(i, 1); save(); render(); }
+          function rPerms() {
+            var p = {}; try { p = JSON.parse(Android.perms()); } catch (e) { return ''; }
+            var bad = [];
+            if (p.nt === false) bad.push(['\u0646\u0648\u062a\u06cc\u0641\u06cc\u06a9\u06cc\u0634\u0646', 'app']);
+            if (p.fs === false) bad.push(['\u0622\u0644\u0627\u0631\u0645 \u062a\u0645\u0627\u0645\u200c\u0635\u0641\u062d\u0647 \u0631\u0648\u06cc \u0642\u0641\u0644', 'fs']);
+            if (p.ex === false) bad.push(['\u0622\u0644\u0627\u0631\u0645 \u062f\u0642\u06cc\u0642', 'ex']);
+            var h = '<div class="box' + (bad.length ? ' warn' : ' ok') + '"><h3>\u23f0 \u0622\u0644\u0627\u0631\u0645 \u0635\u0648\u062a\u06cc</h3>';
+            if (bad.length) h += bad.map(function (b) { return '<div class="row"><span>\u274c ' + b[0] + '</span><button class="btn s" onclick="Android.openSet(\'' + b[1] + '\')">\u0631\u0648\u0634\u0646 \u06a9\u0646</button></div>'; }).join('');
+            else h += '<div>\u2705 \u062f\u0633\u062a\u0631\u0633\u06cc\u200c\u0647\u0627\u06cc \u0622\u0644\u0627\u0631\u0645 \u0627\u0648\u06a9\u06cc\u0647</div>';
+            return h + '<div class="mut sm">\u0622\u0644\u0627\u0631\u0645 \u06f1 \u062f\u0642\u06cc\u0642\u0647 \u0635\u062f\u0627\u062a \u0631\u0648 \u062a\u06a9\u0631\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647. \u0627\u06af\u0647 \u062e\u0627\u0645\u0648\u0634\u0634 \u0646\u06a9\u0646\u06cc\u060c \u06f5 \u062f\u0642\u06cc\u0642\u0647 \u0628\u0639\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u0632\u0646\u06af \u0645\u06cc\u200c\u0632\u0646\u0647 (\u062d\u062f\u0627\u06a9\u062b\u0631 \u06f6 \u0628\u0627\u0631). \u0628\u0631\u0627\u06cc \u0627\u0637\u0645\u06cc\u0646\u0627\u0646\u060c \u0628\u0627\u062a\u0631\u06cc \u0627\u067e \u0631\u0648 Unrestricted \u06a9\u0646.</div><button class="btn g s" onclick="Android.openSet(\'bat\')">\ud83d\udd0b \u0628\u0627\u062a\u0631\u06cc</button> <button class="btn g s" onclick="testN()">\ud83e\uddea \u0622\u0644\u0627\u0631\u0645 \u0622\u0632\u0645\u0627\u06cc\u0634\u06cc (\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u0628\u0639\u062f)</button></div>';
+          }
+          window.onResumeApp = function () { if (TAB == 'set') render(); };
 
           /* ---------- start ---------- */
           if (!S.v2) { for (var i0 = 0; i0 < 7; i0++) { try { Android.cancelAlarm('m' + i0); Android.cancelAlarm('n' + i0); } catch (e) {} } S.v2 = 1; S.v = 2; sv('life1', S); }
