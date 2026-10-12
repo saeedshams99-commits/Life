@@ -962,7 +962,7 @@ jobs:
 
               Runnable timeout = new Runnable() {
                   public void run() {
-                      if (ringing) snooze();
+                      if (ringing) snooze(0);
                       stopAll();
                   }
               };
@@ -984,8 +984,8 @@ jobs:
                   if (in == null) { stopSelf(); return START_NOT_STICKY; }
                   String act = in.getAction();
                   if ("DISMISS".equals(act)) { ringing = false; stopAll(); return START_NOT_STICKY; }
-                  if ("SNOOZE".equals(act)) { if (ringing) snooze(); ringing = false; stopAll(); return START_NOT_STICKY; }
-                  if (ringing) { snooze(); release(); }
+                  if ("SNOOZE".equals(act)) { if (ringing) snooze(in.getIntExtra("min", 0)); ringing = false; stopAll(); return START_NOT_STICKY; }
+                  if (ringing) { snooze(0); release(); }
                   h.removeCallbacks(timeout);
                   h.removeCallbacks(again);
                   id = str(in.getStringExtra("id"));
@@ -1044,7 +1044,8 @@ jobs:
                   fi.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
                   PendingIntent fp = PendingIntent.getActivity(this, 77, fi, AlarmReceiver.flags());
                   PendingIntent dp = PendingIntent.getService(this, 78, new Intent(this, RingService.class).setAction("DISMISS"), AlarmReceiver.flags());
-                  PendingIntent sp = PendingIntent.getService(this, 79, new Intent(this, RingService.class).setAction("SNOOZE"), AlarmReceiver.flags());
+                  PendingIntent sp = PendingIntent.getService(this, 79, new Intent(this, RingService.class).setAction("SNOOZE").putExtra("min", 10), AlarmReceiver.flags());
+                  PendingIntent sp3 = PendingIntent.getService(this, 80, new Intent(this, RingService.class).setAction("SNOOZE").putExtra("min", 30), AlarmReceiver.flags());
                   Notification.Builder b;
                   if (Build.VERSION.SDK_INT >= 26) b = new Notification.Builder(this, CH);
                   else {
@@ -1061,7 +1062,8 @@ jobs:
                   b.setFullScreenIntent(fp, true);
                   b.setContentIntent(fp);
                   b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "\u062e\u0627\u0645\u0648\u0634", dp);
-                  b.addAction(android.R.drawable.ic_lock_idle_alarm, "\u06f5 \u062f\u0642\u06cc\u0642\u0647 \u062f\u06cc\u06af\u0647", sp);
+                  b.addAction(android.R.drawable.ic_lock_idle_alarm, "\u06f1\u06f0 \u062f\u0642\u06cc\u0642\u0647 \u062f\u06cc\u06af\u0647", sp);
+                  b.addAction(android.R.drawable.ic_lock_idle_alarm, "\u06f3\u06f0 \u062f\u0642\u06cc\u0642\u0647 \u062f\u06cc\u06af\u0647", sp3);
                   return b.build();
               }
 
@@ -1107,10 +1109,22 @@ jobs:
                   }
               }
 
-              void snooze() {
-                  if (rep >= MAXREP) return;
+              int defSnooze() {
+                  try {
+                      String v = getSharedPreferences("life", Context.MODE_PRIVATE).getString("__snz", "10");
+                      int m = Integer.parseInt(v.replaceAll("[^0-9]", ""));
+                      return m > 0 ? m : 10;
+                  } catch (Exception e) {
+                      return 10;
+                  }
+              }
+
+              void snooze(int min) {
+                  boolean manual = min > 0;
+                  if (!manual && rep >= MAXREP) return;
+                  if (!manual) min = defSnooze();
                   String zid = id.endsWith("_z") ? id : id + "_z";
-                  AlarmReceiver.setRing(this, zid, System.currentTimeMillis() + 5 * 60000L, title, text, voice, rep + 1);
+                  AlarmReceiver.setRing(this, zid, System.currentTimeMillis() + min * 60000L, title, text, voice, manual ? rep : rep + 1);
               }
 
               void release() {
@@ -1192,12 +1206,27 @@ jobs:
                   d.setOnClickListener(new View.OnClickListener() {
                       public void onClick(View v) { send("DISMISS"); }
                   });
-                  Button s = btn("\ud83d\ude34 \u06f5 \u062f\u0642\u06cc\u0642\u0647 \u062f\u06cc\u06af\u0647", 0xFF1F3A5C);
-                  s.setOnClickListener(new View.OnClickListener() {
-                      public void onClick(View v) { send("SNOOZE"); }
-                  });
                   l.addView(d);
-                  l.addView(s);
+                  TextView sl = tv(15, 0xFF9FB2C8);
+                  sl.setText("\ud83d\ude34 \u062f\u0648\u0628\u0627\u0631\u0647 \u0632\u0646\u06af \u0628\u0632\u0646 \u0628\u0639\u062f \u0627\u0632:");
+                  sl.setPadding(0, 40, 0, 0);
+                  l.addView(sl);
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  int[] mins = new int[]{10, 20, 30};
+                  String[] lbl = new String[]{"\u06f1\u06f0 \u062f\u0642\u06cc\u0642\u0647", "\u06f2\u06f0 \u062f\u0642\u06cc\u0642\u0647", "\u06f3\u06f0 \u062f\u0642\u06cc\u0642\u0647"};
+                  for (int i = 0; i < 3; i++) {
+                      final int m = mins[i];
+                      Button s = btn(lbl[i], 0xFF1F3A5C);
+                      LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, 160, 1f);
+                      p.setMargins(8, 16, 8, 0);
+                      s.setLayoutParams(p);
+                      s.setOnClickListener(new View.OnClickListener() {
+                          public void onClick(View v) { snooze(m); }
+                      });
+                      row.addView(s);
+                  }
+                  l.addView(row);
                   setContentView(l);
                   Intent in = getIntent();
                   show(in.getStringExtra("title"), in.getStringExtra("text"), in.getIntExtra("rep", 0));
@@ -1235,6 +1264,17 @@ jobs:
                   p.setMargins(0, 36, 0, 0);
                   b.setLayoutParams(p);
                   return b;
+              }
+
+              void snooze(int m) {
+                  try {
+                      Intent i = new Intent(this, RingService.class);
+                      i.setAction("SNOOZE");
+                      i.putExtra("min", m);
+                      startService(i);
+                  } catch (Exception e) {
+                  }
+                  finish();
               }
 
               void send(String act) {
@@ -1504,6 +1544,7 @@ jobs:
             for (var k in d) if (S.set[k] === undefined) S.set[k] = d[k];
           }
           fixS();
+          if (!ld('__snz', 0)) sv('__snz', S.set.snz || 10);
           var RTO = null;
           function save() { sv('life1', S); clearTimeout(RTO); RTO = setTimeout(remind, 700); }
 
@@ -1770,12 +1811,15 @@ jobs:
 
           /* ---------- calendar ---------- */
           function openCal() { var j = jOf(SEL); CAL = { y: j[0], m: j[1] }; rCal(); }
+          function calFor(cur, fn) { var j = jOf(cur || dk()); CAL = { y: j[0], m: j[1], cb: fn, cur: cur || '' }; rCal(); }
+          function dPick(hid, lbl) { calFor($(hid).value, function (k) { $(hid).value = k; $(lbl).innerHTML = '\ud83d\udcc5 ' + jStr(k, true); }); }
+          function dField(hid, lbl, val, ph) { return '<input type="hidden" id="' + hid + '" value="' + esc(val || '') + '"><span class="chip" id="' + lbl + '" onclick="dPick(\'' + hid + '\',\'' + lbl + '\')">' + (val ? '\ud83d\udcc5 ' + jStr(val, true) : (ph || '\ud83d\udcc5 \u0627\u0646\u062a\u062e\u0627\u0628 \u062a\u0627\u0631\u06cc\u062e')) + '</span>'; }
           function closeCal() { CAL = null; $('cal').style.display = 'none'; }
           function calM(n) { CAL.m += n; if (CAL.m > 12) { CAL.m = 1; CAL.y++; } if (CAL.m < 1) { CAL.m = 12; CAL.y--; } rCal(); }
-          function calPick(k) { closeCal(); setSel(k); }
+          function calPick(k) { var f = CAL && CAL.cb; closeCal(); if (f) f(k); else setSel(k); }
           function rCal() {
             var y = CAL.y, m = CAL.m, n = jml(y, m), g = j2g(y, m, 1), d = new Date(g[0], g[1] - 1, g[2], 12), off = (d.getDay() + 1) % 7, tk = dk();
-            var h = '<div class="cw"><div class="ch"><span class="ar" onclick="calM(-1)">&#9654;</span><b>' + MON[m - 1] + ' ' + fa(y) + '</b><span class="ar" onclick="calM(1)">&#9664;</span></div><table class="ct"><tr>';
+            var h = '<div class="cw"><div class="ch"><span class="ar" onclick="calM(-1)">&#9654;</span><b>' + (CAL.cb ? '\ud83d\udcc5 ' : '') + MON[m - 1] + ' ' + fa(y) + '</b><span class="ar" onclick="calM(1)">&#9664;</span></div><table class="ct"><tr>';
             WORD.forEach(function (w) { h += '<th' + (w == 5 ? ' class="fr"' : '') + '>' + WDS[w] + '</th>'; });
             h += '</tr><tr>';
             for (var i = 0; i < off; i++) h += '<td></td>';
@@ -1784,13 +1828,13 @@ jobs:
               if (D && (D.tasks.length || D.e || D.sh.length)) dots += '<b style="background:#4C9AFF"></b>';
               if (D && D.rv) dots += '<b style="background:#2EC27E"></b>';
               if (md) dots += '<b style="background:#B48CFF"></b>';
-              var cls = 'cd' + (d.getDay() == 5 ? ' fr' : '') + (k == tk ? ' t' : '') + (k == SEL ? ' s' : '');
+              var cls = 'cd' + (d.getDay() == 5 ? ' fr' : '') + (k == tk ? ' t' : '') + (k == (CAL.cb ? CAL.cur : SEL) ? ' s' : '');
               h += '<td><div class="' + cls + '" onclick="calPick(\'' + k + '\')">' + fa(dd) + '<span class="gr">' + d.getDate() + '</span><i>' + dots + '</i></div></td>';
               if ((off + dd) % 7 == 0 && dd < n) h += '</tr><tr>';
               d.setDate(d.getDate() + 1);
             }
             h += '</tr></table><div class="mut sm" style="margin:6px 0"><b style="color:#4C9AFF">\u25cf</b> \u0628\u0631\u0646\u0627\u0645\u0647 \u00b7 <b style="color:#2EC27E">\u25cf</b> \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc \u00b7 <b style="color:#B48CFF">\u25cf</b> \u0627\u062d\u0648\u0627\u0644</div>' +
-              '<div class="row"><button class="btn s" onclick="calPick(\'' + tk + '\')">\u0627\u0645\u0631\u0648\u0632</button><button class="btn g s" onclick="closeCal()">\u0628\u0633\u062a\u0646</button></div></div>';
+              '<div class="row"><button class="btn s" onclick="calPick(\'' + tk + '\')">\u0627\u0645\u0631\u0648\u0632</button>' + (CAL.cb ? '<button class="btn g s" onclick="calPick(\'' + addD(tk, 1) + '\')">\u0641\u0631\u062f\u0627</button>' : '') + '<button class="btn g s" onclick="closeCal()">\u0628\u0633\u062a\u0646</button></div></div>';
             var el = $('cal'); el.innerHTML = h; el.style.display = 'block';
           }
 
@@ -1814,6 +1858,8 @@ jobs:
             h += '<div id="dyn">' + rDyn() + '</div>';
             h += rRoutines(D, k);
             h += rSites(D, k);
+            var tn = S.nd.filter(function (n) { return !n.d && n.dd == k; }).sort(function (a, b) { return tmin(a.tm || '23:59') - tmin(b.tm || '23:59'); });
+            if (tn.length) h += '<div class="box"><div class="row"><h3>\ud83d\uded2 \u062e\u0631\u06cc\u062f\u0647\u0627\u06cc \u0627\u06cc\u0646 \u0631\u0648\u0632</h3><span class="chip" onclick="go(\'need\')">\u0647\u0645\u0647</span></div>' + tn.map(nRow).join('') + '</div>';
             h += '<div class="box"><div class="row"><h3>\u06a9\u0627\u0631\u0647\u0627</h3><span><button class="btn s" onclick="openForm()">\u2795 \u06a9\u0627\u0631</button> <button class="btn g s" onclick="RP=!RP;FORM=false;EDIT=null;render()">\ud83d\udd04 \u062a\u0646\u0638\u06cc\u0645 \u0645\u062c\u062f\u062f</button></span></div>';
             if (RP) h += rReplan(D);
             if (FORM && !EDIT) h += rForm(null);
@@ -1849,16 +1895,19 @@ jobs:
               h += '<div class="shf"><div class="row" style="flex-wrap:nowrap"><b class="sm">\u0646\u0648\u0628\u062a ' + fa(i + 1) + '</b>' +
                 '<input type="time" style="flex:1" value="' + esc(x.s) + '" onchange="shSet(' + i + ',\'s\',this.value)"><span class="mut">\u062a\u0627</span>' +
                 '<input type="time" style="flex:1" value="' + esc(x.e) + '" onchange="shSet(' + i + ',\'e\',this.value)">' +
-                '<span class="chip' + (x.al ? ' on' : '') + '" onclick="shAl(' + i + ')">\ud83d\udd14</span><span class="chip" onclick="shDel(' + i + ')">\u2715</span></div></div>';
+                '<span class="chip" onclick="shDel(' + i + ')">\u2715</span></div>' + shAlRow(x, i, 'as', '\ud83c\udfea \u0631\u0641\u062a\u0646') + shAlRow(x, i, 'ae', '\ud83c\udfe0 \u0628\u0631\u06af\u0634\u062a\u0646') + '</div>';
             });
             h += '<div>' + (D.sh.length < 3 ? '<button class="btn g s" onclick="shAdd()">\u2795 \u0646\u0648\u0628\u062a ' + fa(D.sh.length + 1) + '</button> ' : '') +
               (!D.sh.length ? '<button class="btn g s" onclick="shCopy()">\ud83d\udccb \u0645\u062b\u0644 \u0622\u062e\u0631\u06cc\u0646 \u0631\u0648\u0632</button>' : '') + '</div>' +
-              '<div class="mut sm">\u0628\u0631 \u0627\u0633\u0627\u0633 \u0627\u0646\u0631\u0698\u06cc\u062a \u062a\u0646\u0638\u06cc\u0645\u0634 \u06a9\u0646. \ud83d\udd14 = \u06cc\u0627\u062f\u0622\u0648\u0631 \u0633\u0631 \u0634\u0631\u0648\u0639 \u0646\u0648\u0628\u062a.</div></div>';
+              '<div class="mut sm">\u0628\u0631 \u0627\u0633\u0627\u0633 \u0627\u0646\u0631\u0698\u06cc\u062a \u062a\u0646\u0638\u06cc\u0645\u0634 \u06a9\u0646. \u0628\u0631\u0627\u06cc \u0631\u0641\u062a\u0646 \u0648 \u0628\u0631\u06af\u0634\u062a\u0646 \u062c\u062f\u0627 \u0622\u0644\u0627\u0631\u0645 \u0628\u0630\u0627\u0631: \u0633\u0631 \u0648\u0642\u062a \u06cc\u0627 \u06f1\u06f0\u060c \u06f2\u06f0\u060c \u06f3\u06f0 \u062f\u0642\u06cc\u0642\u0647 \u0642\u0628\u0644.</div></div>';
             return h;
           }
           function shAdd() { var D = day(SEL), n = D.sh.length; D.sh.push(n ? { s: '17:00', e: '22:00', al: false } : { s: '09:00', e: '14:00', al: false }); save(); render(); }
           function shSet(i, f, v) { var D = day(SEL); D.sh[i][f] = v; save(); refreshDyn(); }
-          function shAl(i) { var D = day(SEL); D.sh[i].al = !D.sh[i].al; save(); render(); }
+          var LEADS = [[-1, '\u062e\u0627\u0645\u0648\u0634'], [0, '\u0633\u0631 \u0648\u0642\u062a'], [10, '\u06f1\u06f0 \u062f \u0642\u0628\u0644'], [20, '\u06f2\u06f0 \u062f \u0642\u0628\u0644'], [30, '\u06f3\u06f0 \u062f \u0642\u0628\u0644']];
+          function shLead(x, f) { if (x[f] === undefined) return f == 'as' && x.al ? 0 : -1; return x[f]; }
+          function shAlRow(x, i, f, lbl) { var v = shLead(x, f); return '<div class="row" style="flex-wrap:nowrap;margin-top:4px"><span class="sm" style="white-space:nowrap">\u23f0 ' + lbl + '</span><div class="chips" style="margin:0">' + LEADS.map(function (l) { return '<span class="chip' + (v == l[0] ? ' on' : '') + '" style="padding:4px 8px;font-size:12px" onclick="shAl(' + i + ',\'' + f + '\',' + l[0] + ')">' + l[1] + '</span>'; }).join('') + '</div></div>'; }
+          function shAl(i, f, v) { var D = day(SEL); D.sh[i][f] = v; delete D.sh[i].al; save(); render(); toast(v < 0 ? '\u0622\u0644\u0627\u0631\u0645 \u062e\u0627\u0645\u0648\u0634 \u0634\u062f' : '\u23f0 ' + (v ? fa(v) + ' \u062f\u0642\u06cc\u0642\u0647 \u0642\u0628\u0644' : '\u0633\u0631 \u0648\u0642\u062a')); }
           function shDel(i) { var D = day(SEL); D.sh.splice(i, 1); save(); render(); }
           function shCopy() {
             for (var i = 1; i <= 14; i++) { var P = peek(addD(SEL, -i)); if (P && P.sh.length) { day(SEL).sh = JSON.parse(JSON.stringify(P.sh)); save(); render(); toast('\ud83d\udccb \u0646\u0648\u0628\u062a\u200c\u0647\u0627\u06cc ' + jStr(addD(SEL, -i)) + ' \u06a9\u067e\u06cc \u0634\u062f'); return; } }
@@ -1955,11 +2004,10 @@ jobs:
           /* ---------- mood ---------- */
           function rMood() {
             var h = '<div class="box"><h3>\u0627\u0644\u0627\u0646 \u0686\u0647 \u062d\u0633\u06cc \u062f\u0627\u0631\u06cc\u061f</h3><div class="mut sm">\u0633\u0627\u0639\u062a \u0648 \u062a\u0627\u0631\u06cc\u062e \u062e\u0648\u062f\u06a9\u0627\u0631 \u062b\u0628\u062a \u0645\u06cc\u0634\u0647.</div><div class="mg" style="margin-top:8px">';
-            MOODS.forEach(function (m) { h += '<div class="mb ' + (m[3] < 0 ? 'neg' : 'pos') + (MF && MF.k == m[0] ? ' on' : '') + '" onclick="mPick(\'' + m[0] + '\')"><span>' + m[1] + '</span>' + m[2] + '</div>'; });
-            h += '</div>';
-            if (MF) {
-              var o = moodOf(MF.k);
-              h += '<div class="box inn"><b>' + o[1] + ' ' + o[2] + '</b> <span class="mut sm">\u00b7 ' + fa(hmOf(Date.now())) + '</span><label><br>\u0634\u062f\u062a</label>' + chips(INT, 5, MF.i, 'mI') +
+            MOODS.forEach(function (m) { h += '<div class="mb ' + (m[3] < 0 ? 'neg' : 'pos') + (MF && MF.ks.indexOf(m[0]) >= 0 ? ' on' : '') + '" onclick="mPick(\'' + m[0] + '\')"><span>' + m[1] + '</span>' + m[2] + '</div>'; });
+            h += '</div><div class="mut sm" style="margin-top:6px">\u0645\u06cc\u200c\u062a\u0648\u0646\u06cc \u0686\u0646\u062f\u062a\u0627 \u0631\u0648 \u0628\u0627 \u0647\u0645 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646\u06cc.</div>';
+            if (MF && MF.ks.length) {
+              h += '<div class="box inn"><span class="mut sm">' + fa(hmOf(Date.now())) + ' \u00b7 \u0634\u062f\u062a \u0647\u0631 \u06a9\u062f\u0648\u0645:</span>' + MF.ks.map(function (k) { var o = moodOf(k); return '<div style="margin-top:6px"><b>' + o[1] + ' ' + o[2] + '</b>' + chips(INT, 5, MF.i[k], 'mI_' + k + '_') + '</div>'; }).join('') +
                 '<label>\u0686\u06cc \u0634\u062f\u061f (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc\u060c \u06a9\u0648\u062a\u0627\u0647)</label><input id="mN" value="' + esc(MF.n) + '" placeholder="\u0645\u062b\u0644\u0627\u064b: \u0645\u0634\u062a\u0631\u06cc \u0628\u062f\u062d\u0633\u0627\u0628\u060c \u0628\u0639\u062f \u0627\u0632 \u0646\u0648\u0628\u062a \u062f\u0648\u0645">' +
                 '<button class="btn" onclick="mSave()">\ud83d\udcbe \u062b\u0628\u062a</button> <button class="btn g" onclick="MF=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button></div>';
             }
@@ -1976,21 +2024,38 @@ jobs:
             h += '<div class="box"><div class="row"><h3>\ud83d\udcd2 \u062c\u062f\u0648\u0644 \u0627\u062d\u0648\u0627\u0644</h3><span class="chip' + (MDALL ? ' on' : '') + '" onclick="MDALL=!MDALL;render()">' + (MDALL ? '\u0647\u0645\u0647' : '\u06f1\u06f4 \u0631\u0648\u0632') + '</span></div>';
             if (!list.length) h += '<div class="mut">\u0647\u0646\u0648\u0632 \u0686\u06cc\u0632\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647.</div>';
             else {
-              h += '<table><tr><th>\u0633\u0627\u0639\u062a</th><th>\u062d\u0627\u0644</th><th>\u0634\u062f\u062a</th><th>\u06cc\u0627\u062f\u062f\u0627\u0634\u062a</th><th></th></tr>';
-              var last = '';
-              list.forEach(function (m) {
-                var k = dk(m.t), o = moodOf(m.k);
-                if (k != last) { h += '<tr><td colspan="5" class="dh">' + jStr(k, true) + '</td></tr>'; last = k; }
-                h += '<tr><td>' + fa(hmOf(m.t)) + '</td><td>' + o[1] + ' ' + o[2] + '</td><td class="dots">' + '\u25cf\u25cf\u25cf\u25cf\u25cf'.substring(0, m.i || 0) + '<span style="color:#3A4F6B">' + '\u25cf\u25cf\u25cf\u25cf\u25cf'.substring(0, 5 - (m.i || 0)) + '</span></td><td class="sm" style="text-align:right">' + esc(m.n) + '</td><td><span onclick="mDel(\'' + m.id + '\')">\u2715</span></td></tr>';
+              h += '<table><tr><th>\u0633\u0627\u0639\u062a</th><th>\u062d\u0627\u0644 \u0648 \u0634\u062f\u062a</th><th>\u06cc\u0627\u062f\u062f\u0627\u0634\u062a</th><th></th></tr>';
+              var last = '', rows = [], gi = {};
+              list.forEach(function (m) { if (m.g && gi[m.g] !== undefined) rows[gi[m.g]].push(m); else { if (m.g) gi[m.g] = rows.length; rows.push([m]); } });
+              rows.forEach(function (r) {
+                var m = r[0], k = dk(m.t);
+                if (k != last) { h += '<tr><td colspan="4" class="dh">' + jStr(k, true) + '</td></tr>'; last = k; }
+                h += '<tr><td>' + fa(hmOf(m.t)) + '</td><td style="text-align:right">' + r.map(function (x) { var o = moodOf(x.k); return '<div>' + o[1] + ' ' + o[2] + ' <span class="dots">' + '\u25cf\u25cf\u25cf\u25cf\u25cf'.substring(0, x.i || 0) + '<span style="color:#3A4F6B">' + '\u25cf\u25cf\u25cf\u25cf\u25cf'.substring(0, 5 - (x.i || 0)) + '</span></span></div>'; }).join('') + '</td><td class="sm" style="text-align:right">' + esc(m.n) + '</td><td><span onclick="mDel(\'' + m.id + '\')">\u2715</span></td></tr>';
               });
               h += '</table>';
             }
             return h + '</div>';
           }
-          function mPick(k) { var n = MF && $('mN') ? $('mN').value : ''; MF = { k: k, i: MF ? MF.i : 3, n: n }; render(); }
-          function mI(n) { MF.i = n; hiChip('mI', n); }
-          function mSave() { S.md.push({ id: uid(), t: Date.now(), k: MF.k, i: MF.i || 3, n: trim($('mN').value) }); var o = moodOf(MF.k); MF = null; save(); render(); toast('\u2705 ' + o[1] + ' ' + o[2] + ' \u062b\u0628\u062a \u0634\u062f'); }
-          function mDel(id) { if (!confirm('\u0627\u06cc\u0646 \u062b\u0628\u062a \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f')) return; S.md = S.md.filter(function (m) { return m.id != id; }); save(); render(); }
+          function mPick(k) {
+            var n = MF && $('mN') ? $('mN').value : '';
+            if (!MF) MF = { ks: [], i: {}, n: '' };
+            MF.n = n; var p = MF.ks.indexOf(k);
+            if (p >= 0) MF.ks.splice(p, 1); else { MF.ks.push(k); if (!MF.i[k]) MF.i[k] = 3; }
+            MOODS.forEach(function (m) { var fn = 'mI_' + m[0] + '_'; if (!window[fn]) window[fn] = (function (kk, f) { return function (v) { MF.i[kk] = v; hiChip(f, v); }; })(m[0], fn); });
+            render();
+          }
+          function mSave() {
+            if (!MF || !MF.ks.length) { toast('\u06cc\u0647 \u062d\u0627\u0644\u062a \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646'); return; }
+            var t = Date.now(), g = MF.ks.length > 1 ? 'g' + uid() : '', n = trim($('mN').value);
+            MF.ks.forEach(function (k) { S.md.push({ id: uid(), t: t, k: k, i: MF.i[k] || 3, n: n, g: g }); });
+            var txt = MF.ks.map(function (k) { return moodOf(k)[1]; }).join(' ');
+            MF = null; save(); render(); toast('\u2705 ' + txt + ' \u062b\u0628\u062a \u0634\u062f');
+          }
+          function mDel(id) {
+            var m = null; S.md.forEach(function (x) { if (x.id == id) m = x; }); if (!m) return;
+            if (!confirm(m.g ? '\u0627\u06cc\u0646 \u062b\u0628\u062a (\u0628\u0627 \u0647\u0645\u0647 \u062d\u0627\u0644\u062a\u200c\u0647\u0627\u0634) \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f' : '\u0627\u06cc\u0646 \u062b\u0628\u062a \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f')) return;
+            S.md = S.md.filter(function (x) { return m.g ? x.g != m.g : x.id != id; }); save(); render();
+          }
 
           /* ---------- night ---------- */
           function rNight() {
@@ -2173,8 +2238,14 @@ jobs:
               var D = peek(k);
               if (D) {
                 D.tasks.forEach(function (t) { if (t.al && t.tm && !t.d && !t.mv) add('t' + t.id, tsOf(k, t.tm), '\u23f0 ' + t.tm + ' \u00b7 ' + t.t, t.na ? '\u25b6\ufe0f ' + t.na : '\u0648\u0642\u062a\u0634\u0647', t.vc); });
-                D.sh.forEach(function (s, j) { if (s.al && s.s) add('s' + k + j, tsOf(k, s.s), '\ud83c\udfea \u0646\u0648\u0628\u062a ' + fa(j + 1) + ' \u0645\u063a\u0627\u0632\u0647', fa(s.s) + ' \u062a\u0627 ' + fa(s.e || '?')); });
+                D.sh.forEach(function (s, j) {
+                  var a1 = shLead(s, 'as'), a2 = shLead(s, 'ae');
+                  if (a1 >= 0 && s.s) add('s' + k + j, tsOf(k, s.s) - a1 * 60000, '\ud83c\udfea ' + (a1 ? fa(a1) + ' \u062f\u0642\u06cc\u0642\u0647 \u062f\u06cc\u06af\u0647 ' : '\u0627\u0644\u0627\u0646 ') + '\u0646\u0648\u0628\u062a ' + fa(j + 1) + ' \u0645\u063a\u0627\u0632\u0647', '\u0633\u0627\u0639\u062a ' + fa(s.s) + ' \u062a\u0627 ' + fa(s.e || '?'));
+                  if (a2 >= 0 && s.e) { var te = tsOf(k, s.e); if (te < tsOf(k, s.s)) te += 86400000; add('e' + k + j, te - a2 * 60000, '\ud83c\udfe0 ' + (a2 ? fa(a2) + ' \u062f\u0642\u06cc\u0642\u0647 \u062f\u06cc\u06af\u0647 ' : '\u0627\u0644\u0627\u0646 ') + '\u0646\u0648\u0628\u062a ' + fa(j + 1) + ' \u062a\u0645\u0648\u0645 \u0645\u06cc\u0634\u0647', '\u0633\u0627\u0639\u062a ' + fa(s.e)); }
+                });
               }
+              S.nd.forEach(function (n) { if (!n.d && n.al && n.dd == k && n.tm) add('b' + n.id, tsOf(k, n.tm), '\ud83d\uded2 ' + n.t + (n.q ? ' (' + n.q + ')' : ''), (siteOf(n.site) ? '\u0627\u0632 ' + siteOf(n.site).n + ' \u00b7 ' : '') + '\u0633\u0627\u0639\u062a ' + fa(n.tm)); });
+              S.ppl.forEach(function (p) { (p.lg || []).forEach(function (e) { if (e.due == k && e.dal && !e.dn) add('d' + e.id, dueTs(e), (LG[e.ty][2] > 0 ? '\ud83d\udcb0 \u0633\u0631\u0631\u0633\u06cc\u062f \u0637\u0644\u0628 \u0627\u0632 ' : '\ud83d\udcb8 \u0633\u0631\u0631\u0633\u06cc\u062f \u0628\u062f\u0647\u06cc \u0628\u0647 ') + p.n, fmtN(numM(e.a)) + ' \u062a\u0648\u0645\u0627\u0646' + (e.it ? ' \u00b7 ' + e.it : '')); }); });
               if (i < 2) rtFor(k).forEach(function (x) { if (x.r.al && !(D && D.rt[x.key])) add('r' + k + x.key, tsOf(k, x.tm), '\ud83d\udccc ' + x.r.n, '\u0633\u0627\u0639\u062a ' + fa(x.tm) + '\u060c \u0627\u0646\u062c\u0627\u0645\u0634 \u062f\u0627\u062f\u06cc \u062a\u06cc\u06a9 \u0628\u0632\u0646', x.r.vc); });
             })(addD(k0, i), i);
             return w;
@@ -2288,7 +2359,7 @@ jobs:
               if (p.cat != last) { h += '<div class="dh" style="margin-top:6px">' + CATS[p.cat][0] + ' ' + CATS[p.cat][1] + '</div>'; last = p.cat; }
               var lv = pLast(p), av = pAvg(p);
               h += '<div class="task" onclick="pOpen(\'' + p.id + '\')"><div class="row"><b>' + esc(p.n) + '</b><span class="sm">' + balTxt(pBal(p)) + '</span></div>' +
-                '<div class="row mut sm"><span class="dots">' + stars(p.pr) + '</span><span>' + (lv ? '\ud83e\udd1d ' + ago(lv) : '\u062f\u06cc\u062f\u0627\u0631\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647') + (av ? ' \u00b7 \u0646\u0645\u0631\u0647 ' + fa(r1(av)) : '') + (pDue(p) ? ' <b style="color:#E0A040">\u23f0 \u0648\u0642\u062a \u062f\u06cc\u062f\u0627\u0631</b>' : '') + '</span></div></div>';
+                '<div class="row mut sm"><span class="dots">' + stars(p.pr) + '</span><span>' + (lv ? '\ud83e\udd1d ' + ago(lv) : '\u062f\u06cc\u062f\u0627\u0631\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647') + (av ? ' \u00b7 \u0646\u0645\u0631\u0647 ' + fa(r1(av)) : '') + (pDue(p) ? ' <b style="color:#E0A040">\u23f0 \u0648\u0642\u062a \u062f\u06cc\u062f\u0627\u0631</b>' : '') + '</span></div>' + (function () { var d = pDueOpen(p).sort(function (a, b) { return dueTs(a) - dueTs(b); })[0]; if (!d) return ''; var late = dueTs(d) < Date.now(); return '<div class="sm" style="color:' + (late ? '#FF7B7B' : '#E0A040') + '">\u23f0 \u0633\u0631\u0631\u0633\u06cc\u062f ' + jStr(d.due) + ' \u00b7 ' + fmtN(numM(d.a)) + (late ? ' (\u06af\u0630\u0634\u062a\u0647)' : '') + '</div>'; })() + '</div>';
             });
             return h;
           }
@@ -2386,6 +2457,7 @@ jobs:
                 '<div class="row"><div class="f1"><label>\u062a\u0639\u062f\u0627\u062f</label><input id="lgQ" inputmode="decimal" oninput="lgCalc()"></div><div class="f1"><label>\u0642\u06cc\u0645\u062a \u0648\u0627\u062d\u062f (\u062a\u0648\u0645\u0627\u0646)</label><input id="lgU" inputmode="numeric" oninput="lgCalc()"></div></div>' +
                 '<label>\u0645\u0628\u0644\u063a \u06a9\u0644 (\u062a\u0648\u0645\u0627\u0646)</label><input id="lgA" inputmode="numeric" oninput="lgShow()"><div class="mut sm" id="lgAv"></div>' +
                 '<label>\u062a\u0648\u0636\u06cc\u062d (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="lgX">' +
+                '<div class="shf"><b class="sm">\u23f0 \u0633\u0631\u0631\u0633\u06cc\u062f (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</b><div class="row" style="flex-wrap:nowrap">' + dField('lgD', 'lgDl', '', '\ud83d\udcc5 \u062a\u0627\u0631\u06cc\u062e') + '<input type="time" id="lgDt" value="10:00" style="flex:1"></div><label><input type="checkbox" id="lgDa" checked> \u23f0 \u0622\u0644\u0627\u0631\u0645 \u0633\u0631 \u0647\u0645\u06cc\u0646 \u062a\u0627\u0631\u06cc\u062e \u0648 \u0633\u0627\u0639\u062a</label><div class="mut sm">\u0645\u062b\u0644\u0627\u064b \u06af\u0641\u062a\u0647 \u06f2\u06f5 \u0645\u0647\u0631 \u067e\u0648\u0644\u0634 \u0631\u0648 \u0645\u06cc\u062f\u0647.</div></div>' +
                 '<button class="btn" onclick="lgSave(\'' + p.id + '\')">\ud83d\udcbe \u062b\u0628\u062a</button> <button class="btn g" onclick="PADD=\'\';render()">\u0627\u0646\u0635\u0631\u0627\u0641</button></div>';
             }
             var l = (p.lg || []).slice().sort(function (a, b) { return a.t - b.t; }), run = 0, rows = [];
@@ -2395,13 +2467,22 @@ jobs:
               h += '<table><tr><th>\u062a\u0627\u0631\u06cc\u062e</th><th>\u0634\u0631\u062d</th><th>\u0628\u062f\u0647\u06a9\u0627\u0631</th><th>\u0628\u0633\u062a\u0627\u0646\u06a9\u0627\u0631</th><th>\u0645\u0627\u0646\u062f\u0647</th><th></th></tr>';
               rows.reverse().forEach(function (r) {
                 var e = r[0];
-                h += '<tr><td class="sm">' + jStr(dk(e.t)) + '<br>' + fa(hmOf(e.t)) + '</td><td class="sm" style="text-align:right">' + LG[e.ty][0] + ' ' + esc(e.it || LG[e.ty][1]) + (numM(e.q) ? '<br><span class="mut">' + fa(numM(e.q)) + ' \u00d7 ' + fmtN(numM(e.u)) + '</span>' : '') + (e.x ? '<br><span class="mut">' + esc(e.x) + '</span>' : '') + '</td>' +
+                h += '<tr><td class="sm">' + jStr(dk(e.t)) + '<br>' + fa(hmOf(e.t)) + '</td><td class="sm" style="text-align:right">' + LG[e.ty][0] + ' ' + esc(e.it || LG[e.ty][1]) + (numM(e.q) ? '<br><span class="mut">' + fa(numM(e.q)) + ' \u00d7 ' + fmtN(numM(e.u)) + '</span>' : '') + (e.x ? '<br><span class="mut">' + esc(e.x) + '</span>' : '') + dueTag(p, e) + '</td>' +
                   '<td style="color:#4ED38A">' + (r[1] > 0 ? fmtN(numM(e.a)) : '') + '</td><td style="color:#FF7B7B">' + (r[1] < 0 ? fmtN(numM(e.a)) : '') + '</td><td class="sm">' + fmtN(r[2]) + '</td><td><span onclick="pSubDel(\'' + p.id + '\',\'lg\',\'' + e.id + '\')">\ud83d\uddd1</span></td></tr>';
               });
               h += '</table><div class="mut sm">\u0628\u062f\u0647\u06a9\u0627\u0631 = \u0627\u0648\u0646 \u0628\u0647 \u0645\u0646 \u0628\u062f\u0647\u06a9\u0627\u0631 \u0634\u062f (\u062c\u0646\u0633 \u0628\u0631\u062f \u06cc\u0627 \u0628\u0647\u0634 \u067e\u0648\u0644 \u062f\u0627\u062f\u0645). \u0628\u0633\u062a\u0627\u0646\u06a9\u0627\u0631 = \u0627\u0648\u0646 \u067e\u0631\u062f\u0627\u062e\u062a \u06a9\u0631\u062f \u06cc\u0627 \u0645\u0646 \u0627\u0632\u0634 \u06af\u0631\u0641\u062a\u0645. \u0645\u0627\u0646\u062f\u0647 \u0645\u062b\u0628\u062a \u06cc\u0639\u0646\u06cc \u0637\u0644\u0628\u06a9\u0627\u0631\u0645.</div>';
             }
             return h + '<button class="btn g s" onclick="cpTxt(lgText(\'' + p.id + '\'),\'\ud83d\udccb \u0635\u0648\u0631\u062a\u200c\u062d\u0633\u0627\u0628 \u06a9\u067e\u06cc \u0634\u062f\')">\ud83d\udccb \u06a9\u067e\u06cc \u0635\u0648\u0631\u062a\u200c\u062d\u0633\u0627\u0628</button></div>';
           }
+          function dueTs(e) { return e.due ? tsOf(e.due, e.dtm || '10:00') : 0; }
+          function dueTag(p, e) {
+            if (!e.due) return '';
+            if (e.dn) return '<br><span class="sm" style="color:#4ED38A">\u2705 \u0633\u0631\u0631\u0633\u06cc\u062f ' + jStr(e.due) + ' \u0627\u0646\u062c\u0627\u0645 \u0634\u062f</span> <span class="chip" style="padding:2px 6px;font-size:11px" onclick="dueDone(\'' + p.id + '\',\'' + e.id + '\')">\u21a9\ufe0f</span>';
+            var late = dueTs(e) < Date.now();
+            return '<br><span class="sm" style="color:' + (late ? '#FF7B7B' : '#E0A040') + '">\u23f0 ' + (late ? '\u0633\u0631\u0631\u0633\u06cc\u062f \u06af\u0630\u0634\u062a\u0647: ' : '\u0633\u0631\u0631\u0633\u06cc\u062f: ') + jStr(e.due) + ' ' + fa(e.dtm || '') + (e.dal ? ' \ud83d\udd14' : '') + '</span> <span class="chip" style="padding:2px 6px;font-size:11px" onclick="dueDone(\'' + p.id + '\',\'' + e.id + '\')">\u2705 \u0627\u0646\u062c\u0627\u0645 \u0634\u062f</span>';
+          }
+          function dueDone(pid, id) { var p = pFind(pid); p.lg.forEach(function (e) { if (e.id == id) e.dn = e.dn ? 0 : Date.now(); }); save(); render(); }
+          function pDueOpen(p) { return (p.lg || []).filter(function (e) { return e.due && !e.dn; }); }
           function lgTy(k) { $('lgT').value = k; Object.keys(LG).forEach(function (z) { $('lgt' + z).className = 'chip' + (z == k ? ' on' : ''); }); }
           function lgCalc() { var q = num($('lgQ').value), u = numM($('lgU').value); if (q && u) { $('lgA').value = String(Math.round(q * u)); lgShow(); } }
           function lgShow() { var a = numM($('lgA').value); $('lgAv').textContent = a ? fmtN(a) + ' \u062a\u0648\u0645\u0627\u0646' : ''; }
@@ -2409,8 +2490,9 @@ jobs:
             var ty = $('lgT').value, a = numM($('lgA').value);
             if (!ty) { toast('\u0646\u0648\u0639 \u0631\u062f\u06cc\u0641 \u0631\u0648 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646'); return; }
             if (!a) { toast('\u0645\u0628\u0644\u063a \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
-            pFind(pid).lg.push({ id: uid(), t: Date.now(), ty: ty, it: trim($('lgI').value), q: $('lgQ').value, u: $('lgU').value, a: a, x: trim($('lgX').value) });
-            PADD = ''; save(); render(); toast('\u2705 \u062b\u0628\u062a \u0634\u062f');
+            var due = $('lgD').value, dtm = $('lgDt').value || '10:00';
+            pFind(pid).lg.push({ id: uid(), t: Date.now(), ty: ty, it: trim($('lgI').value), q: $('lgQ').value, u: $('lgU').value, a: a, x: trim($('lgX').value), due: due, dtm: due ? dtm : '', dal: !!(due && $('lgDa').checked), dn: 0 });
+            PADD = ''; save(); render(); toast('\u2705 \u062b\u0628\u062a \u0634\u062f' + (due ? ' \u00b7 \u23f0 \u0633\u0631\u0631\u0633\u06cc\u062f ' + jStr(due) : ''));
           }
           function lgText(pid) {
             var p = pFind(pid), run = 0, s = '\u0635\u0648\u0631\u062a\u200c\u062d\u0633\u0627\u0628 ' + p.n + '\n';
@@ -2449,7 +2531,7 @@ jobs:
               '<div class="chips"><span class="chip' + (!NSITE ? ' on' : '') + '" onclick="NSITE=\'\';render()">\u0647\u0631 \u062c\u0627</span>' + S.sites.map(function (s) { return '<span class="chip' + (NSITE == s.id ? ' on' : '') + '" onclick="NSITE=\'' + s.id + '\';render()">' + esc(s.n) + '</span>'; }).join('') + '<span class="chip' + (NSITE == '-' ? ' on' : '') + '" onclick="NSITE=\'-\';render()">\u0628\u062f\u0648\u0646 \u0633\u0627\u06cc\u062a</span></div>';
             if (NF && !NF.id) h += nForm();
             var l = S.nd.filter(function (n) { return (!NSEC || n.sec == NSEC) && (!NSITE || (NSITE == '-' ? !n.site : n.site == NSITE)); });
-            var op = l.filter(function (n) { return !n.d; }).sort(function (a, b) { return (b.pr - a.pr) || (a.cr - b.cr); }), dn = l.filter(function (n) { return n.d; }).sort(function (a, b) { return b.d - a.d; });
+            var op = l.filter(function (n) { return !n.d; }).sort(function (a, b) { return (b.pr - a.pr) || ((a.dd ? tsOf(a.dd, a.tm || '23:59') : 9e15) - (b.dd ? tsOf(b.dd, b.tm || '23:59') : 9e15)) || (a.cr - b.cr); }), dn = l.filter(function (n) { return n.d; }).sort(function (a, b) { return b.d - a.d; });
             if (!op.length && !(NF && !NF.id)) h += '<div class="mut">\u0646\u06cc\u0627\u0632 \u0628\u0627\u0632\u06cc \u0646\u06cc\u0633\u062a \ud83d\udc4c</div>';
             var last = '';
             op.forEach(function (n) {
@@ -2467,7 +2549,7 @@ jobs:
             var s = siteOf(n.site);
             return '<div class="task' + (n.d ? ' done' : '') + '"><div class="row" style="flex-wrap:nowrap"><span class="ck' + (n.d ? ' on' : '') + '" onclick="nTgl(\'' + n.id + '\')">' + (n.d ? '\u2713' : '') + '</span>' +
               '<div class="tt f1" onclick="NF=JSON.parse(JSON.stringify(ndFind(\'' + n.id + '\')));render()"><b>' + esc(n.t) + '</b>' + (n.q ? ' <span class="tm">' + esc(fa(n.q)) + '</span>' : '') + '<br><span class="sm">' + NPR[n.pr || 2] + '</span>' + (s ? ' <span class="mut sm">\u00b7 ' + esc(s.n) + '</span>' : '') +
-              (n.d ? '<span class="mut sm"> \u00b7 \u062e\u0631\u06cc\u062f ' + jStr(dk(n.d)) + '</span>' : '') + (n.x ? '<div class="mut sm">' + esc(n.x) + '</div>' : '') + '</div>' + (s && !n.d ? '<button class="btn g s" onclick="stOpen(\'' + s.id + '\')">\u2197\ufe0f</button>' : '') + '</div></div>';
+              (n.d ? '<span class="mut sm"> \u00b7 \u062e\u0631\u06cc\u062f ' + jStr(dk(n.d)) + '</span>' : '') + (n.dd && !n.d ? ' <span class="tm" style="' + (tsOf(n.dd, n.tm || '23:59') < Date.now() ? 'background:#5A2020' : '') + '">\ud83d\udcc5 ' + jStr(n.dd) + (n.tm ? ' ' + fa(n.tm) : '') + (n.al ? ' \ud83d\udd14' : '') + '</span>' : '') + (n.x ? '<div class="mut sm">' + esc(n.x) + '</div>' : '') + '</div>' + (s && !n.d ? '<button class="btn g s" onclick="stOpen(\'' + s.id + '\')">\u2197\ufe0f</button>' : '') + '</div></div>';
           }
           function ndFind(id) { for (var i = 0; i < S.nd.length; i++) if (S.nd[i].id == id) return S.nd[i]; return null; }
           function nForm() {
@@ -2477,14 +2559,17 @@ jobs:
               '<label>\u0627\u0632 \u06a9\u062c\u0627\u061f</label><div class="chips"><span class="chip' + (!x.site ? ' on' : '') + '" onclick="nfGrab();NF.site=\'\';render()">\u0641\u0631\u0642\u06cc \u0646\u062f\u0627\u0631\u0647</span>' + S.sites.map(function (s) { return '<span class="chip' + (x.site == s.id ? ' on' : '') + '" onclick="nfGrab();NF.site=\'' + s.id + '\';render()">' + esc(s.n) + '</span>'; }).join('') + '</div>' +
               '<label>\u0627\u0648\u0644\u0648\u06cc\u062a</label><div class="chips">' + [3, 2, 1].map(function (i) { return '<span class="chip' + (x.pr == i ? ' on' : '') + '" onclick="nfGrab();NF.pr=' + i + ';render()">' + NPR[i] + '</span>'; }).join('') + '</div>' +
               '<label>\u06cc\u0627\u062f\u062f\u0627\u0634\u062a (\u0628\u0631\u0646\u062f\u060c \u0642\u06cc\u0645\u062a \u062f\u06cc\u062f\u0647\u200c\u0634\u062f\u0647\u060c ...)</label><input id="nfX" value="' + esc(x.x) + '">' +
+              '<div class="shf"><b class="sm">\ud83d\udcc5 \u06a9\u0650\u06cc\u061f (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</b><div class="row" style="flex-wrap:nowrap">' + dField('nfD', 'nfDl', x.dd, '\ud83d\udcc5 \u062a\u0627\u0631\u06cc\u062e') + '<input type="time" id="nfTm" value="' + esc(x.tm || '') + '" style="flex:1"></div><label><input type="checkbox" id="nfAl" ' + (x.al !== false ? 'checked' : '') + '> \u23f0 \u0622\u0644\u0627\u0631\u0645 \u0635\u0648\u062a\u06cc</label>' + (x.dd ? ' <span class="chip" onclick="$(\'nfD\').value=\'\';$(\'nfDl\').innerHTML=\'\ud83d\udcc5 \u062a\u0627\u0631\u06cc\u062e\'">\u2715 \u0628\u062f\u0648\u0646 \u062a\u0627\u0631\u06cc\u062e</span>' : '') + '<div class="mut sm">\u0645\u062b\u0644\u0627\u064b \u062e\u0631\u06cc\u062f \u0646\u0648\u0646\u060c \u0641\u0631\u062f\u0627 \u0633\u0627\u0639\u062a \u06f7:\u06f3\u06f0.</div></div>' +
               '<button class="btn" onclick="nfSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g" onclick="NF=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button>' + (x.id ? ' <button class="btn r" onclick="nDel()">\ud83d\uddd1</button>' : '') + '</div>';
           }
-          function nfGrab() { if (!$('nfT')) return; NF.t = $('nfT').value; NF.q = $('nfQ').value; NF.x = $('nfX').value; }
+          function nfGrab() { if (!$('nfT')) return; NF.t = $('nfT').value; NF.q = $('nfQ').value; NF.x = $('nfX').value; NF.dd = $('nfD').value; NF.tm = $('nfTm').value; NF.al = $('nfAl').checked; }
           function nfSave() {
             nfGrab(); if (!trim(NF.t)) { toast('\u0628\u0646\u0648\u06cc\u0633 \u0686\u06cc \u0644\u0627\u0632\u0645\u0647'); return; }
             var n = NF.id ? ndFind(NF.id) : null;
             if (!n) { n = { id: 'n' + uid(), cr: Date.now(), d: 0 }; S.nd.push(n); }
             n.t = trim(NF.t); n.q = trim(NF.q); n.x = trim(NF.x); n.sec = NF.sec; n.site = NF.site; n.pr = NF.pr;
+            n.dd = NF.dd || ''; n.tm = n.dd ? (NF.tm || '') : ''; n.al = !!(n.dd && n.tm && NF.al);
+            if (NF.dd && !NF.tm && NF.al) toast('\u0628\u0631\u0627\u06cc \u0622\u0644\u0627\u0631\u0645\u060c \u0633\u0627\u0639\u062a \u0631\u0648 \u0647\u0645 \u0628\u0630\u0627\u0631');
             var again = !NF.id; NF = again ? { id: '', t: '', sec: n.sec, site: n.site, q: '', x: '', pr: 2 } : null; save(); render(); toast('\u2705 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f' + (again ? '\u061b \u0628\u0639\u062f\u06cc \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633' : ''));
             if (again) setTimeout(function () { var e = $('nfT'); if (e) e.focus(); }, 50);
           }
@@ -2533,7 +2618,7 @@ jobs:
             var h = '<div class="box' + (bad.length ? ' warn' : ' ok') + '"><h3>\u23f0 \u0622\u0644\u0627\u0631\u0645 \u0635\u0648\u062a\u06cc</h3>';
             if (bad.length) h += bad.map(function (b) { return '<div class="row"><span>\u274c ' + b[0] + '</span><button class="btn s" onclick="Android.openSet(\'' + b[1] + '\')">\u0631\u0648\u0634\u0646 \u06a9\u0646</button></div>'; }).join('');
             else h += '<div>\u2705 \u062f\u0633\u062a\u0631\u0633\u06cc\u200c\u0647\u0627\u06cc \u0622\u0644\u0627\u0631\u0645 \u0627\u0648\u06a9\u06cc\u0647</div>';
-            return h + '<div class="mut sm">\u0622\u0644\u0627\u0631\u0645 \u06f1 \u062f\u0642\u06cc\u0642\u0647 \u0635\u062f\u0627\u062a \u0631\u0648 \u062a\u06a9\u0631\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647. \u0627\u06af\u0647 \u062e\u0627\u0645\u0648\u0634\u0634 \u0646\u06a9\u0646\u06cc\u060c \u06f5 \u062f\u0642\u06cc\u0642\u0647 \u0628\u0639\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u0632\u0646\u06af \u0645\u06cc\u200c\u0632\u0646\u0647 (\u062d\u062f\u0627\u06a9\u062b\u0631 \u06f6 \u0628\u0627\u0631). \u0628\u0631\u0627\u06cc \u0627\u0637\u0645\u06cc\u0646\u0627\u0646\u060c \u0628\u0627\u062a\u0631\u06cc \u0627\u067e \u0631\u0648 Unrestricted \u06a9\u0646.</div><button class="btn g s" onclick="Android.openSet(\'bat\')">\ud83d\udd0b \u0628\u0627\u062a\u0631\u06cc</button> <button class="btn g s" onclick="testN()">\ud83e\uddea \u0622\u0644\u0627\u0631\u0645 \u0622\u0632\u0645\u0627\u06cc\u0634\u06cc (\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u0628\u0639\u062f)</button></div>';
+            return h + '<label>\u0627\u06af\u0647 \u062c\u0648\u0627\u0628 \u0646\u062f\u0627\u062f\u0645\u060c \u062f\u0648\u0628\u0627\u0631\u0647 \u0632\u0646\u06af \u0628\u0632\u0646\u0647 \u0628\u0639\u062f \u0627\u0632:</label><div class="chips">' + [10, 20, 30].map(function (m) { return '<span class="chip' + ((S.set.snz || 10) == m ? ' on' : '') + '" onclick="S.set.snz=' + m + ';sv(\'__snz\',' + m + ');save();render()">' + fa(m) + ' \u062f\u0642\u06cc\u0642\u0647</span>'; }).join('') + '</div><div class="mut sm">\u0622\u0644\u0627\u0631\u0645 \u06f1 \u062f\u0642\u06cc\u0642\u0647 \u0635\u062f\u0627\u062a \u0631\u0648 \u062a\u06a9\u0631\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647. \u0627\u06af\u0647 \u062e\u0627\u0645\u0648\u0634\u0634 \u0646\u06a9\u0646\u06cc\u060c \u0628\u0639\u062f \u0627\u0632 ' + fa(S.set.snz || 10) + ' \u062f\u0642\u06cc\u0642\u0647 \u062f\u0648\u0628\u0627\u0631\u0647 \u0632\u0646\u06af \u0645\u06cc\u200c\u0632\u0646\u0647 (\u062d\u062f\u0627\u06a9\u062b\u0631 \u06f6 \u0628\u0627\u0631). \u0631\u0648\u06cc \u0635\u0641\u062d\u0647 \u0622\u0644\u0627\u0631\u0645 \u0647\u0645 \u062f\u06a9\u0645\u0647 \u06f1\u06f0\u060c \u06f2\u06f0 \u0648 \u06f3\u06f0 \u062f\u0642\u06cc\u0642\u0647 \u0647\u0633\u062a. \u0628\u0631\u0627\u06cc \u0627\u0637\u0645\u06cc\u0646\u0627\u0646\u060c \u0628\u0627\u062a\u0631\u06cc \u0627\u067e \u0631\u0648 Unrestricted \u06a9\u0646.</div><button class="btn g s" onclick="Android.openSet(\'bat\')">\ud83d\udd0b \u0628\u0627\u062a\u0631\u06cc</button> <button class="btn g s" onclick="testN()">\ud83e\uddea \u0622\u0644\u0627\u0631\u0645 \u0622\u0632\u0645\u0627\u06cc\u0634\u06cc (\u06f1\u06f0 \u062b\u0627\u0646\u06cc\u0647 \u0628\u0639\u062f)</button></div>';
           }
           window.onResumeApp = function () { if (TAB == 'set') render(); };
 
@@ -2587,7 +2672,7 @@ jobs:
           function shopAt() {
             var v = $('ssT').value; if (hm2m(v) < 0) { toast('\u0633\u0627\u0639\u062a \u0631\u0648 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646'); return; }
             var D = day(SEL), e = (hm2m(v) + 300) % 1440;
-            D.sh.unshift({ s: v, e: pad(Math.floor(e / 60)) + ':' + pad(e % 60), al: true }); save(); render(); toast('\ud83c\udfea \u0646\u0648\u0628\u062a \u06f1 \u062b\u0628\u062a \u0634\u062f\u060c \u0633\u0627\u0639\u062a \u067e\u0627\u06cc\u0627\u0646\u0634 \u0631\u0648 \u067e\u0627\u06cc\u06cc\u0646 \u062f\u0631\u0633\u062a \u06a9\u0646');
+            D.sh.unshift({ s: v, e: pad(Math.floor(e / 60)) + ':' + pad(e % 60), as: 10, ae: -1 }); save(); render(); toast('\ud83c\udfea \u0646\u0648\u0628\u062a \u06f1 \u062b\u0628\u062a \u0634\u062f\u060c \u0633\u0627\u0639\u062a \u067e\u0627\u06cc\u0627\u0646\u0634 \u0631\u0648 \u067e\u0627\u06cc\u06cc\u0646 \u062f\u0631\u0633\u062a \u06a9\u0646');
           }
           function sleepNow() {
             var k = dk(), D = day(k); D.slp = Date.now(); D.bt = hmOf(D.slp); save(); render(); toast('\ud83c\udf19 \u0634\u0628 \u0628\u062e\u06cc\u0631\u060c \u0633\u0627\u0639\u062a ' + fa(D.bt) + ' \u062b\u0628\u062a \u0634\u062f');
