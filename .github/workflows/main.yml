@@ -91,6 +91,13 @@ jobs:
                       <category android:name="android.intent.category.LAUNCHER" />
                   </intent>
                   <intent>
+                      <action android:name="android.media.action.IMAGE_CAPTURE" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.GET_CONTENT" />
+                      <data android:mimeType="image/*" />
+                  </intent>
+                  <intent>
                       <action android:name="android.intent.action.VIEW" />
                       <data android:scheme="https" />
                   </intent>
@@ -106,6 +113,7 @@ jobs:
                   <activity android:name=".RingActivity" android:exported="false" android:launchMode="singleTop"
                       android:excludeFromRecents="true" android:taskAffinity="com.saeed.life.ring" />
                   <service android:name=".RingService" android:exported="false" android:foregroundServiceType="mediaPlayback" />
+                  <provider android:name=".PhotoProvider" android:authorities="com.saeed.life.photos" android:exported="false" android:grantUriPermissions="true" />
                   <receiver android:name=".AlarmReceiver" android:exported="false" />
                   <receiver android:name=".BootReceiver" android:exported="true">
                       <intent-filter>
@@ -127,6 +135,14 @@ jobs:
           import android.content.pm.PackageManager;
           import android.content.pm.ResolveInfo;
           import android.database.Cursor;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Matrix;
+          import android.media.ExifInterface;
+          import android.net.Uri;
+          import android.provider.MediaStore;
+          import java.io.FileOutputStream;
+          import java.io.OutputStream;
           import android.media.MediaPlayer;
           import android.media.MediaRecorder;
           import android.os.Build;
@@ -157,6 +173,8 @@ jobs:
               long recT0 = 0;
               MediaPlayer pl;
               String pickCb = "";
+              String imgCb = "";
+              String imgId = "";
 
               @Override
               protected void onCreate(Bundle b) {
@@ -166,6 +184,7 @@ jobs:
                   WebSettings s = web.getSettings();
                   s.setJavaScriptEnabled(true);
                   s.setDomStorageEnabled(true);
+                  s.setAllowFileAccess(true);
                   web.setWebViewClient(new WebViewClient());
                   web.setWebChromeClient(new WebChromeClient());
                   web.setBackgroundColor(0xFF0B1A2E);
@@ -200,6 +219,7 @@ jobs:
               @Override
               protected void onActivityResult(int rq, int rs, Intent data) {
                   super.onActivityResult(rq, rs, data);
+                  if (rq == 8 || rq == 9) { imgResult(rq, rs, data); return; }
                   if (rq != 7) return;
                   JSONObject r = new JSONObject();
                   try {
@@ -217,6 +237,84 @@ jobs:
                   } catch (Exception e) {
                   }
                   jsCb(pickCb, r.toString());
+              }
+
+              File camFile() {
+                  return new File(getCacheDir(), "cam_" + sid(imgId) + ".jpg");
+              }
+
+              File imgFile(String id) {
+                  File d = new File(getFilesDir(), "img");
+                  d.mkdirs();
+                  return new File(d, sid(id) + ".jpg");
+              }
+
+              void imgResult(final int rq, int rs, final Intent data) {
+                  final String cb = imgCb, id = imgId;
+                  if (rs != RESULT_OK) { jsCb(cb, "{\"ok\":0}"); return; }
+                  new Thread(new Runnable() {
+                      public void run() {
+                          boolean ok = false;
+                          File tmp = null;
+                          try {
+                              if (rq == 8) {
+                                  tmp = camFile();
+                              } else if (data != null && data.getData() != null) {
+                                  tmp = new File(getCacheDir(), "gal_" + sid(id) + ".tmp");
+                                  InputStream in = getContentResolver().openInputStream(data.getData());
+                                  OutputStream out = new FileOutputStream(tmp);
+                                  byte[] buf = new byte[16384];
+                                  int n;
+                                  while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                                  in.close();
+                                  out.close();
+                              }
+                              if (tmp != null && tmp.exists() && tmp.length() > 0) ok = shrink(tmp, imgFile(id));
+                          } catch (Exception e) {
+                              ok = false;
+                          }
+                          try { if (tmp != null) tmp.delete(); } catch (Exception e) { }
+                          jsCb(cb, ok ? "{\"ok\":1}" : "{\"ok\":0}");
+                      }
+                  }).start();
+              }
+
+              static boolean shrink(File src, File dst) {
+                  try {
+                      BitmapFactory.Options o = new BitmapFactory.Options();
+                      o.inJustDecodeBounds = true;
+                      BitmapFactory.decodeFile(src.getAbsolutePath(), o);
+                      int mx = Math.max(o.outWidth, o.outHeight), ss = 1;
+                      if (mx <= 0) return false;
+                      while (mx / (ss * 2) >= 1800) ss *= 2;
+                      BitmapFactory.Options o2 = new BitmapFactory.Options();
+                      o2.inSampleSize = ss;
+                      Bitmap b = BitmapFactory.decodeFile(src.getAbsolutePath(), o2);
+                      if (b == null) return false;
+                      int rot = 0;
+                      try {
+                          ExifInterface e = new ExifInterface(src.getAbsolutePath());
+                          int or = e.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+                          if (or == ExifInterface.ORIENTATION_ROTATE_90) rot = 90;
+                          else if (or == ExifInterface.ORIENTATION_ROTATE_180) rot = 180;
+                          else if (or == ExifInterface.ORIENTATION_ROTATE_270) rot = 270;
+                      } catch (Exception e) {
+                      }
+                      float sc = Math.min(1f, 1800f / Math.max(b.getWidth(), b.getHeight()));
+                      Bitmap out = b;
+                      if (sc < 1f || rot != 0) {
+                          Matrix m = new Matrix();
+                          if (sc < 1f) m.postScale(sc, sc);
+                          if (rot != 0) m.postRotate(rot);
+                          out = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+                      }
+                      FileOutputStream fo = new FileOutputStream(dst);
+                      out.compress(Bitmap.CompressFormat.JPEG, 82, fo);
+                      fo.close();
+                      return dst.length() > 0;
+                  } catch (Throwable t) {
+                      return false;
+                  }
               }
 
               void jsCb(String cb, String json) {
@@ -452,6 +550,69 @@ jobs:
                               }
                           }
                       });
+                  }
+
+                  @JavascriptInterface
+                  public void imgCam(final String id, final String cb) {
+                      imgId = id;
+                      imgCb = cb;
+                      runOnUiThread(new Runnable() {
+                          public void run() {
+                              try {
+                                  File f = camFile();
+                                  f.delete();
+                                  Uri u = Uri.parse("content://" + PhotoProvider.AUTH + "/" + f.getName());
+                                  Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                                  i.putExtra(MediaStore.EXTRA_OUTPUT, u);
+                                  i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                                  i.setClipData(android.content.ClipData.newRawUri("", u));
+                                  startActivityForResult(i, 8);
+                              } catch (Exception e) {
+                                  jsCb(cb, "{\"ok\":0,\"err\":\"cam\"}");
+                              }
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void imgGal(final String id, final String cb) {
+                      imgId = id;
+                      imgCb = cb;
+                      runOnUiThread(new Runnable() {
+                          public void run() {
+                              try {
+                                  Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                                  i.setType("image/*");
+                                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                                  startActivityForResult(Intent.createChooser(i, "Photo"), 9);
+                              } catch (Exception e) {
+                                  jsCb(cb, "{\"ok\":0,\"err\":\"gal\"}");
+                              }
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public String imgPath(String id) {
+                      File f = imgFile(id);
+                      return f.exists() ? "file://" + f.getAbsolutePath() : "";
+                  }
+
+                  @JavascriptInterface
+                  public void imgDel(String id) {
+                      try { imgFile(id).delete(); } catch (Exception e) { }
+                  }
+
+                  @JavascriptInterface
+                  public void imgView(String id) {
+                      try {
+                          Uri u = Uri.parse("content://" + PhotoProvider.AUTH + "/" + sid(id) + ".jpg");
+                          Intent i = new Intent(Intent.ACTION_VIEW);
+                          i.setDataAndType(u, "image/jpeg");
+                          i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                          startAct(i);
+                      } catch (Exception e) {
+                      }
                   }
 
                   @JavascriptInterface
@@ -1097,6 +1258,78 @@ jobs:
               }
           }
           EOF_X
+          cat > src/main/java/com/saeed/life/PhotoProvider.java <<'EOF_X'
+          package com.saeed.life;
+
+          import android.content.ContentProvider;
+          import android.content.ContentValues;
+          import android.database.Cursor;
+          import android.database.MatrixCursor;
+          import android.net.Uri;
+          import android.os.ParcelFileDescriptor;
+          import android.provider.OpenableColumns;
+          import java.io.File;
+          import java.io.FileNotFoundException;
+
+          public class PhotoProvider extends ContentProvider {
+              static final String AUTH = "com.saeed.life.photos";
+
+              @Override
+              public boolean onCreate() {
+                  return true;
+              }
+
+              File fileFor(Uri u) {
+                  String n = u.getLastPathSegment();
+                  if (n == null) return null;
+                  n = n.replaceAll("[^A-Za-z0-9_.]", "");
+                  if (n.length() == 0) return null;
+                  File d = n.startsWith("cam_") ? getContext().getCacheDir() : new File(getContext().getFilesDir(), "img");
+                  return new File(d, n);
+              }
+
+              @Override
+              public ParcelFileDescriptor openFile(Uri u, String mode) throws FileNotFoundException {
+                  File f = fileFor(u);
+                  if (f == null) throw new FileNotFoundException();
+                  int m;
+                  if (mode != null && mode.contains("w")) {
+                      m = ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE;
+                  } else {
+                      m = ParcelFileDescriptor.MODE_READ_ONLY;
+                  }
+                  return ParcelFileDescriptor.open(f, m);
+              }
+
+              @Override
+              public String getType(Uri u) {
+                  return "image/jpeg";
+              }
+
+              @Override
+              public Cursor query(Uri u, String[] proj, String sel, String[] args, String sort) {
+                  File f = fileFor(u);
+                  MatrixCursor c = new MatrixCursor(new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE});
+                  if (f != null) c.addRow(new Object[]{f.getName(), Long.valueOf(f.length())});
+                  return c;
+              }
+
+              @Override
+              public Uri insert(Uri u, ContentValues v) {
+                  return null;
+              }
+
+              @Override
+              public int delete(Uri u, String s, String[] a) {
+                  return 0;
+              }
+
+              @Override
+              public int update(Uri u, ContentValues v, String s, String[] a) {
+                  return 0;
+              }
+          }
+          EOF_X
           cat > src/main/assets/index.html <<'EOF_X'
           <!DOCTYPE html>
           <html lang="fa" dir="rtl">
@@ -1183,6 +1416,14 @@ jobs:
           .cd .gr { font-size: 9px; color: #6F86A3; }
           .cd.s .gr { color: #DDE8FF; }
           .vcb { background: #0B1A2E; border: 1px dashed #2A4366; border-radius: 10px; padding: 8px; margin: 8px 0; }
+          .phs { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+          .ph { width: 74px; height: 74px; border-radius: 10px; overflow: hidden; background: #0B1A2E; position: relative; display: flex; align-items: center; justify-content: center; border: 1px solid #2A4366; }
+          .ph img { width: 100%; height: 100%; object-fit: cover; }
+          .phx { position: absolute; top: 2px; left: 2px; background: #000A; color: #fff; border-radius: 9px; width: 18px; height: 18px; font-size: 11px; text-align: center; line-height: 18px; }
+          .pvw { display: flex; flex-direction: column; height: 100%; background: #0B1A2E; }
+          .pvi { height: 56%; overflow: auto; background: #000; text-align: center; }
+          .pvi img { display: block; margin: 0 auto; }
+          .pvd { flex: 1; overflow: auto; padding: 8px 12px; }
           </style>
           </head>
           <body>
@@ -1191,6 +1432,7 @@ jobs:
           <div id="pg"></div>
           <div class="nav" id="nav"></div>
           <div class="cal" id="cal" onclick="if(event.target.id=='cal')closeCal()"></div>
+          <div class="cal" id="ov" style="background:#000"></div>
           <div class="toast" id="toast"></div>
           <script>
           var BUILD = parseInt('__BUILD__', 10) || 0;
@@ -1497,10 +1739,11 @@ jobs:
 
           /* ---------- UI state ---------- */
           var SEL = dk(), TAB = 'today', EDIT = null, FORM = false, RP = false, CAL = null, MF = null, MDALL = false, RE = null, RV = null;
-          function go(t) { vcEnd(); VC = null; TAB = t; EDIT = null; FORM = false; RP = false; MF = null; RE = null; PF = null; NF = null; SED = null; PADD = ''; PUF = null; WEDIT = false; if (t != 'ppl') PP = null; render(); window.scrollTo(0, 0); }
+          function go(t) { vcEnd(); VC = null; TAB = t; EDIT = null; FORM = false; RP = false; MF = null; RE = null; PF = null; NF = null; SED = null; PADD = ''; (PUF && PUF.nph || []).forEach(function (id) { try { Android.imgDel(id); } catch (e) {} }); PUF = null; WEDIT = false; if (t != 'ppl') PP = null; render(); window.scrollTo(0, 0); }
           function appBack() {
+            if (PV) { pvClose(); return true; }
             if (CAL) { closeCal(); return true; }
-            if (FORM || EDIT || RP || MF || RE || PF || NF || SED || PADD || PUF || WEDIT) { vcEnd(); VC = null; FORM = false; EDIT = null; RP = false; MF = null; RE = null; PF = null; NF = null; SED = null; PADD = ''; PUF = null; WEDIT = false; render(); return true; }
+            if (FORM || EDIT || RP || MF || RE || PF || NF || SED || PADD || PUF || WEDIT) { vcEnd(); VC = null; FORM = false; EDIT = null; RP = false; MF = null; RE = null; PF = null; NF = null; SED = null; PADD = ''; (PUF && PUF.nph || []).forEach(function (id) { try { Android.imgDel(id); } catch (e) {} }); PUF = null; WEDIT = false; render(); return true; }
             if (PP) { PP = null; render(); return true; }
             if (TAB == 'night') { go('today'); return true; }
             if (TAB != 'today') { go('today'); return true; }
@@ -1848,7 +2091,7 @@ jobs:
               '<div class="mut sm">\u0645\u062b\u0644\u0627\u064b \u06f4: \u06a9\u0627\u0631\u0647\u0627\u06cc \u0633\u0627\u0639\u062a \u06f1 \u0648 \u06f3 \u0628\u0627\u0645\u062f\u0627\u062f \u062c\u0632\u0648 \u0647\u0645\u0648\u0646 \u0631\u0648\u0632\u0646 \u0648 \u062a\u0631\u062a\u06cc\u0628\u0634\u0648\u0646 \u0628\u0639\u062f \u0627\u0632 \u06f2\u06f3 \u0645\u06cc\u0627\u062f.</div></div>' +
               rRtEdit() + rSiteEdit() + rSecEdit() +
               '<div class="box"><h3>\ud83e\udde0 \u067e\u0631\u0627\u0645\u067e\u062a \u0627\u0635\u0644\u06cc</h3><div class="mut sm">\u062e\u0627\u0644\u06cc \u06cc\u0627 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636 = \u0646\u0633\u062e\u0647 \u062e\u0644\u0627\u0635\u0647. \u0645\u06cc\u200c\u062a\u0648\u0646\u06cc \u067e\u0631\u0627\u0645\u067e\u062a \u06a9\u0627\u0645\u0644\u062a \u0631\u0648 \u0627\u06cc\u0646\u062c\u0627 \u0628\u0630\u0627\u0631\u06cc.</div><textarea id="spT" style="min-height:140px;font-size:12px">' + esc(s.sp || DEF_PROMPT) + '</textarea><button class="btn s" onclick="saveSp()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g s" onclick="S.set.sp=\'\';save();render();toast(\'\u067e\u06cc\u0634\u200c\u0641\u0631\u0636 \u0628\u0631\u06af\u0634\u062a\')">\u21a9\ufe0f \u067e\u06cc\u0634\u200c\u0641\u0631\u0636</button></div>' +
-              '<div class="box"><h3>\ud83d\udcbe \u062d\u0641\u0638 \u062f\u0627\u062f\u0647\u200c\u0647\u0627</h3><div class="mut sm">\u062f\u0627\u062f\u0647\u200c\u0647\u0627 \u0631\u0648\u06cc \u06af\u0648\u0634\u06cc \u0645\u06cc\u200c\u0645\u0648\u0646\u0646 \u0648 \u0628\u0627 \u0622\u067e\u062f\u06cc\u062a \u067e\u0627\u06a9 \u0646\u0645\u06cc\u0634\u0646 (\u0627\u0645\u0636\u0627\u06cc \u062b\u0627\u0628\u062a). \u0648\u0644\u06cc \u0627\u06af\u0647 \u0627\u067e \u067e\u0627\u06a9 \u0628\u0634\u0647 \u06cc\u0627 \u06af\u0648\u0634\u06cc \u0639\u0648\u0636 \u0628\u0634\u0647\u060c \u0641\u0642\u0637 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0646\u062c\u0627\u062a\u062a \u0645\u06cc\u062f\u0647. \u0647\u0641\u062a\u0647\u200c\u0627\u06cc \u06cc\u0647 \u0628\u0627\u0631 \u0628\u0641\u0631\u0633\u062a\u0634 \u06cc\u0647 \u062c\u0627\u06cc \u062e\u0635\u0648\u0635\u06cc (\u067e\u06cc\u0627\u0645\u200c\u0647\u0627\u06cc \u0630\u062e\u06cc\u0631\u0647\u200c\u0634\u062f\u0647 \u062e\u0648\u062f\u062a). \u26a0\ufe0f \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0634\u0627\u0645\u0644 \u0634\u0645\u0627\u0631\u0647 \u06a9\u0627\u0631\u062a \u0648 \u062d\u0633\u0627\u0628\u200c\u0647\u0627\u0633\u062a\u061b \u062a\u0648 \u06af\u0631\u0648\u0647 \u06cc\u0627 \u062c\u0627\u06cc \u0639\u0645\u0648\u0645\u06cc \u0646\u0641\u0631\u0633\u062a\u0634.' + (s.lb ? '<br>\u0622\u062e\u0631\u06cc\u0646 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646: ' + jStr(dk(s.lb)) : '') + '</div>' +
+              '<div class="box"><h3>\ud83d\udcbe \u062d\u0641\u0638 \u062f\u0627\u062f\u0647\u200c\u0647\u0627</h3><div class="mut sm">\u062f\u0627\u062f\u0647\u200c\u0647\u0627 \u0631\u0648\u06cc \u06af\u0648\u0634\u06cc \u0645\u06cc\u200c\u0645\u0648\u0646\u0646 \u0648 \u0628\u0627 \u0622\u067e\u062f\u06cc\u062a \u067e\u0627\u06a9 \u0646\u0645\u06cc\u0634\u0646 (\u0627\u0645\u0636\u0627\u06cc \u062b\u0627\u0628\u062a). \u0648\u0644\u06cc \u0627\u06af\u0647 \u0627\u067e \u067e\u0627\u06a9 \u0628\u0634\u0647 \u06cc\u0627 \u06af\u0648\u0634\u06cc \u0639\u0648\u0636 \u0628\u0634\u0647\u060c \u0641\u0642\u0637 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0646\u062c\u0627\u062a\u062a \u0645\u06cc\u062f\u0647. \u0647\u0641\u062a\u0647\u200c\u0627\u06cc \u06cc\u0647 \u0628\u0627\u0631 \u0628\u0641\u0631\u0633\u062a\u0634 \u06cc\u0647 \u062c\u0627\u06cc \u062e\u0635\u0648\u0635\u06cc (\u067e\u06cc\u0627\u0645\u200c\u0647\u0627\u06cc \u0630\u062e\u06cc\u0631\u0647\u200c\u0634\u062f\u0647 \u062e\u0648\u062f\u062a). \u26a0\ufe0f \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0634\u0627\u0645\u0644 \u0634\u0645\u0627\u0631\u0647 \u06a9\u0627\u0631\u062a \u0648 \u062d\u0633\u0627\u0628\u200c\u0647\u0627\u0633\u062a\u061b \u062a\u0648 \u06af\u0631\u0648\u0647 \u06cc\u0627 \u062c\u0627\u06cc \u0639\u0645\u0648\u0645\u06cc \u0646\u0641\u0631\u0633\u062a\u0634. \u0639\u06a9\u0633 \u0641\u0627\u06a9\u062a\u0648\u0631\u0647\u0627 \u062a\u0648\u06cc \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0645\u062a\u0646\u06cc \u0646\u06cc\u0633\u062a\u0646 \u0648 \u0641\u0642\u0637 \u0631\u0648\u06cc \u06af\u0648\u0634\u06cc \u0645\u06cc\u200c\u0645\u0648\u0646\u0646.' + (s.lb ? '<br>\u0622\u062e\u0631\u06cc\u0646 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646: ' + jStr(dk(s.lb)) : '') + '</div>' +
               '<button class="btn s" onclick="shareB()">\ud83d\udce4 \u0627\u0631\u0633\u0627\u0644 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646</button> <button class="btn g s" onclick="backup()">\ud83d\udccb \u06a9\u067e\u06cc</button> <button class="btn g s" onclick="restore()">\ud83d\udce5 \u0628\u0627\u0632\u06cc\u0627\u0628\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f</button> <button class="btn g s" onclick="restoreSnap()">\u23ea \u0646\u0633\u062e\u0647 \u062e\u0648\u062f\u06a9\u0627\u0631 \u062f\u06cc\u0631\u0648\u0632</button></div>' +
               '<div class="box"><h3>\ud83c\udd95 \u0622\u067e\u062f\u06cc\u062a</h3><div class="mut">\u0646\u0633\u062e\u0647 \u0641\u0639\u0644\u06cc: v' + fa(BUILD) + '</div><button class="btn s" onclick="checkUpdate(true)">\u0628\u0631\u0631\u0633\u06cc \u0622\u067e\u062f\u06cc\u062a</button></div>' +
               '<div class="box"><button class="btn r s" onclick="resetAll()">\ud83d\uddd1 \u067e\u0627\u06a9 \u06a9\u0631\u062f\u0646 \u0647\u0645\u0647 \u062f\u0627\u062f\u0647\u200c\u0647\u0627</button></div>';
@@ -2387,26 +2630,30 @@ jobs:
               var t = puTot(p), op = PUO == p.id;
               h += '<div class="task"><div class="row" onclick="PUO=PUO==\'' + p.id + '\'?null:\'' + p.id + '\';render()"><b>\ud83c\udfe2 ' + esc(p.co) + '</b><span class="mut sm">' + dtStr(p.t) + '</span></div>' +
                 '<div class="row sm" onclick="PUO=PUO==\'' + p.id + '\'?null:\'' + p.id + '\';render()"><span>' + fa(p.it.length) + ' \u0642\u0644\u0645 \u00b7 \u062e\u0631\u06cc\u062f ' + fmtN(t.b) + '</span><span>\u0633\u0648\u062f ' + fmtN(t.p) + ' \u00b7 ' + mgTxt(t.b, t.s) + '</span></div>' +
-                '<div class="sm">' + (p.pd ? '<span style="color:#4ED38A">\u2705 \u062a\u0633\u0648\u06cc\u0647</span>' : '<span style="color:#FF7B7B">\u23f3 \u067e\u0631\u062f\u0627\u062e\u062a\u200c\u0646\u0634\u062f\u0647' + (p.due ? ' \u00b7 \u0633\u0631\u0631\u0633\u06cc\u062f ' + esc(p.due) : '') + '</span>') + '</div>';
+                '<div class="sm">' + ((p.ph || []).length ? '\ud83d\udcf8 ' + fa(p.ph.length) + ' \u00b7 ' : '') + (p.vn ? '\ud83d\udc64 ' + esc(p.vn) + ' \u00b7 ' : '') + (p.pd ? '<span style="color:#4ED38A">\u2705 \u062a\u0633\u0648\u06cc\u0647</span>' : '<span style="color:#FF7B7B">\u23f3 \u067e\u0631\u062f\u0627\u062e\u062a\u200c\u0646\u0634\u062f\u0647' + (p.due ? ' \u00b7 \u0633\u0631\u0631\u0633\u06cc\u062f ' + esc(p.due) : '') + '</span>') + '</div>';
               if (op) {
                 h += '<table style="margin-top:6px"><tr><th>\u06a9\u0627\u0644\u0627</th><th>\u062a\u0639\u062f\u0627\u062f</th><th>\u062e\u0631\u06cc\u062f</th><th>\u0641\u0631\u0648\u0634</th><th>\u0633\u0648\u062f \u0648\u0627\u062d\u062f</th><th>\u062d\u0627\u0634\u06cc\u0647</th></tr>' + p.it.map(function (i) {
                   return '<tr><td style="text-align:right">' + esc(i.n) + '</td><td>' + fa(num(i.q) || 1) + '</td><td>' + fmtN(numM(i.b)) + '</td><td>' + fmtN(numM(i.s)) + '</td><td>' + fmtN(numM(i.s) - numM(i.b)) + '</td><td>' + mgTxt(i.b, i.s) + '</td></tr>';
                 }).join('') + '<tr><td><b>\u062c\u0645\u0639</b></td><td></td><td><b>' + fmtN(t.b) + '</b></td><td><b>' + fmtN(t.s) + '</b></td><td><b>' + fmtN(t.p) + '</b></td><td>' + mgTxt(t.b, t.s) + '</td></tr></table>' +
                   (p.x ? '<div class="mut sm">' + esc(p.x) + '</div>' : '') +
+                  (p.vn || p.vp ? '<div class="row" style="margin-top:6px"><span>\ud83d\udc64 ' + esc(p.vn || '') + ' <span style="direction:ltr">' + fa(p.vp || '') + '</span></span>' + (p.vp ? '<span><button class="btn s" onclick="Android.dial(\'' + digits(p.vp) + '\')">\ud83d\udcde \u062a\u0645\u0627\u0633</button> <button class="btn g s" onclick="cpTxt(\'' + digits(p.vp) + '\')">\ud83d\udccb</button></span>' : '') + '</div>' : '') +
+                  ((p.ph || []).length ? '<div onclick="pvOpen(\'' + p.id + '\',0)">' + phStrip(p.ph, false) + '</div><button class="btn g s" onclick="pvOpen(\'' + p.id + '\',0)">\ud83d\udd0d \u0645\u0642\u0627\u06cc\u0633\u0647 \u0639\u06a9\u0633 \u0628\u0627 \u0641\u0627\u06a9\u062a\u0648\u0631</button>' : '<div class="mut sm">\ud83d\udcf8 \u0639\u06a9\u0633 \u0641\u0627\u06a9\u062a\u0648\u0631 \u0646\u062f\u0627\u0631\u0647\u061b \u0628\u0627 \u270f\ufe0f \u0648\u06cc\u0631\u0627\u06cc\u0634 \u0627\u0636\u0627\u0641\u0647 \u06a9\u0646</div>') +
                   '<div style="margin-top:6px"><button class="btn s" onclick="puPaid(\'' + p.id + '\')">' + (p.pd ? '\u21a9\ufe0f \u067e\u0631\u062f\u0627\u062e\u062a\u200c\u0646\u0634\u062f\u0647' : '\u2705 \u062a\u0633\u0648\u06cc\u0647 \u0634\u062f') + '</button> <button class="btn g s" onclick="puEdit(\'' + p.id + '\')">\u270f\ufe0f \u0648\u06cc\u0631\u0627\u06cc\u0634</button> <button class="btn g s" onclick="puCopy(\'' + p.id + '\')">\ud83d\udccb \u062a\u06a9\u0631\u0627\u0631 \u0627\u06cc\u0646 \u062e\u0631\u06cc\u062f</button> <button class="btn r s" onclick="puDel(\'' + p.id + '\')">\ud83d\uddd1</button></div>';
               }
               h += '</div>';
             });
             return h + '</div><div class="mut sm" style="margin:0 14px">\u062d\u0627\u0634\u06cc\u0647 \u0633\u0648\u062f \u0627\u0632 \u0628\u0627\u0644\u0627 \u0628\u0647 \u067e\u0627\u06cc\u06cc\u0646: (\u0641\u0631\u0648\u0634 \u2212 \u062e\u0631\u06cc\u062f) \u00f7 \u0641\u0631\u0648\u0634. \u0645\u062b\u0644\u0627\u064b \u06f7\u06f5 \u0648 \u06f1\u06f0\u06f0 \u2190 \u06f2\u06f5\u066a.</div>';
           }
-          function puNew() { PUF = { id: '', co: '', it: [{ n: '', q: '', b: '', s: '' }], pd: true, due: '', x: '' }; render(); }
+          function puNew() { PUF = { id: '', co: '', it: [{ n: '', q: '', b: '', s: '' }], pd: true, due: '', x: '', vn: '', vp: '', ph: [] }; render(); }
           function puEdit(id) { var p = puFind(id); PUF = JSON.parse(JSON.stringify(p)); render(); }
-          function puCopy(id) { var p = puFind(id); PUF = JSON.parse(JSON.stringify(p)); PUF.id = ''; PUF.it.forEach(function (i) { i.q = ''; }); PUF.pd = true; PUF.due = ''; render(); toast('\ud83d\udccb \u06a9\u0627\u0644\u0627\u0647\u0627 \u0648 \u0642\u06cc\u0645\u062a\u200c\u0647\u0627\u06cc \u0642\u0628\u0644\u06cc \u0627\u0648\u0645\u062f\u061b \u062a\u0639\u062f\u0627\u062f\u0647\u0627 \u0631\u0648 \u0628\u0632\u0646'); }
+          function puCopy(id) { var p = puFind(id); PUF = JSON.parse(JSON.stringify(p)); PUF.id = ''; PUF.it.forEach(function (i) { i.q = ''; }); PUF.pd = true; PUF.due = ''; PUF.ph = []; render(); toast('\ud83d\udccb \u06a9\u0627\u0644\u0627\u0647\u0627 \u0648 \u0642\u06cc\u0645\u062a\u200c\u0647\u0627\u06cc \u0642\u0628\u0644\u06cc \u0627\u0648\u0645\u062f\u061b \u062a\u0639\u062f\u0627\u062f\u0647\u0627 \u0631\u0648 \u0628\u0632\u0646'); }
           function puFind(id) { for (var i = 0; i < S.pu.length; i++) if (S.pu[i].id == id) return S.pu[i]; return null; }
           function puForm() {
             var x = PUF, cl = cos();
-            var h = '<div class="box"><h3>\ud83e\uddfe ' + (x.id ? '\u0648\u06cc\u0631\u0627\u06cc\u0634 \u062e\u0631\u06cc\u062f' : '\u062e\u0631\u06cc\u062f \u062c\u062f\u06cc\u062f') + '</h3><label>\u0634\u0631\u06a9\u062a</label><input id="puC" value="' + esc(x.co) + '" placeholder="\u0645\u062b\u0644\u0627\u064b \u0634\u0631\u06a9\u062a \u0648\u06cc\u0646\u0633\u062a\u0648\u0646">';
-            if (cl.length) h += '<div class="chips">' + cl.map(function (c, i) { return '<span class="chip' + (x.co == c ? ' on' : '') + '" onclick="puGrab();PUF.co=cos()[' + i + '];render()">' + esc(c) + '</span>'; }).join('') + '</div>';
+            var h = '<div class="box"><h3>\ud83e\uddfe ' + (x.id ? '\u0648\u06cc\u0631\u0627\u06cc\u0634 \u062e\u0631\u06cc\u062f' : '\u062e\u0631\u06cc\u062f \u062c\u062f\u06cc\u062f') + '</h3><label>\u0634\u0631\u06a9\u062a</label><input id="puC" value="' + esc(x.co) + '" placeholder="\u0645\u062b\u0644\u0627\u064b \u0634\u0631\u06a9\u062a \u0648\u06cc\u0646\u0633\u062a\u0648\u0646" onchange="puGrab();visFill();if(PUF.vn||PUF.vp)render()">';
+            if (cl.length) h += '<div class="chips">' + cl.map(function (c, i) { return '<span class="chip' + (x.co == c ? ' on' : '') + '" onclick="puCoSet(cos()[' + i + '])">' + esc(c) + '</span>'; }).join('') + '</div>';
+            h += visBox(x);
+            h += '<div class="shf"><b class="sm">\ud83d\udcf8 \u0639\u06a9\u0633 \u0641\u0627\u06a9\u062a\u0648\u0631</b>' + phStrip(x.ph, true) + '<button class="btn g s" onclick="phAdd(\'cam\')">\ud83d\udcf7 \u062f\u0648\u0631\u0628\u06cc\u0646</button> <button class="btn g s" onclick="phAdd(\'gal\')">\ud83d\uddbc \u06af\u0627\u0644\u0631\u06cc</button>' + ((x.ph || []).length ? ' <button class="btn g s" onclick="pvOpenF(0)">\ud83d\udd0d \u0645\u0642\u0627\u06cc\u0633\u0647</button>' : '') + '</div>';
             h += '<label>\u06a9\u0627\u0644\u0627\u0647\u0627 (\u0642\u06cc\u0645\u062a \u0647\u0631 \u0648\u0627\u062d\u062f)</label>';
             x.it.forEach(function (i, n) {
               h += '<div class="shf"><div class="row" style="flex-wrap:nowrap"><b class="sm">' + fa(n + 1) + '</b><input id="piN' + n + '" value="' + esc(i.n) + '" placeholder="\u0627\u0633\u0645 \u06a9\u0627\u0644\u0627 (\u0645\u062b\u0644\u0627\u064b \u0648\u06cc\u0646\u0633\u062a\u0648\u0646 \u0627\u0648\u0644\u062a\u0631\u0627)" onchange="piFill(' + n + ')" style="flex:1">' + (x.it.length > 1 ? '<span class="chip" onclick="puGrab();PUF.it.splice(' + n + ',1);render()">\u2715</span>' : '') + '</div>' +
@@ -2418,7 +2665,7 @@ jobs:
               '<label><input type="checkbox" id="puP" ' + (x.pd ? 'checked' : '') + ' onchange="puGrab();render()"> \u067e\u0648\u0644\u0634 \u0631\u0648 \u062f\u0627\u062f\u0645 (\u062a\u0633\u0648\u06cc\u0647)</label>' +
               (x.pd ? '' : '<label><br>\u0633\u0631\u0631\u0633\u06cc\u062f \u067e\u0631\u062f\u0627\u062e\u062a (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="puD" value="' + esc(x.due) + '" placeholder="\u0645\u062b\u0644\u0627\u064b \u06f2\u06f5 \u0645\u0647\u0631 \u06cc\u0627 \u0686\u06a9 \u06f1\u06f5 \u0622\u0628\u0627\u0646">') +
               '<label><br>\u062a\u0648\u0636\u06cc\u062d (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</label><input id="puX" value="' + esc(x.x) + '">' +
-              '<button class="btn" onclick="puSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647 \u062e\u0631\u06cc\u062f</button> <button class="btn g" onclick="PUF=null;render()">\u0627\u0646\u0635\u0631\u0627\u0641</button></div>';
+              '<button class="btn" onclick="puSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647 \u062e\u0631\u06cc\u062f</button> <button class="btn g" onclick="puCancel()">\u0627\u0646\u0635\u0631\u0627\u0641</button></div>';
             return h;
           }
           function piInfo(i) {
@@ -2430,7 +2677,7 @@ jobs:
           }
           function puGrab() {
             if (!$('puC')) return;
-            PUF.co = $('puC').value; PUF.x = $('puX').value; PUF.pd = $('puP').checked; if ($('puD')) PUF.due = $('puD').value;
+            PUF.co = $('puC').value; PUF.x = $('puX').value; if ($('puVn')) { PUF.vn = $('puVn').value; PUF.vp = $('puVp').value; } PUF.pd = $('puP').checked; if ($('puD')) PUF.due = $('puD').value;
             PUF.it.forEach(function (i, n) { i.n = $('piN' + n).value; i.q = $('piQ' + n).value; i.b = $('piB' + n).value; i.s = $('piS' + n).value; });
           }
           function piCalc(n) { puGrab(); $('piM' + n).innerHTML = piInfo(PUF.it[n]); $('puT').innerHTML = puTotH(); }
@@ -2449,11 +2696,13 @@ jobs:
             var p = PUF.id ? puFind(PUF.id) : null;
             if (!p) { p = { id: 'u' + uid(), t: Date.now() }; S.pu.push(p); }
             p.co = co; p.it = it; p.pd = PUF.pd; p.due = PUF.pd ? '' : trim(PUF.due); p.x = trim(PUF.x);
+            p.vn = trim(PUF.vn || ''); p.vp = trim(PUF.vp || ''); p.ph = (PUF.ph || []).slice();
+            (PUF.dph || []).forEach(function (id) { try { Android.imgDel(id); } catch (e) {} });
             var low = it.filter(function (i) { return i.s && mg(i.b, i.s) < 10; }).length;
             PUF = null; PUO = p.id; save(); render(); toast('\u2705 \u062e\u0631\u06cc\u062f \u062b\u0628\u062a \u0634\u062f' + (low ? ' \u00b7 \u26a0\ufe0f ' + fa(low) + ' \u06a9\u0627\u0644\u0627 \u062d\u0627\u0634\u06cc\u0647 \u0632\u06cc\u0631 \u06f1\u06f0\u066a \u062f\u0627\u0631\u0647' : ''));
           }
           function puPaid(id) { var p = puFind(id); p.pd = !p.pd; if (p.pd) p.pdt = Date.now(); save(); render(); }
-          function puDel(id) { if (!confirm('\u0627\u06cc\u0646 \u062e\u0631\u06cc\u062f \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f')) return; S.pu = S.pu.filter(function (p) { return p.id != id; }); PUO = null; save(); render(); }
+          function puDel(id) { if (!confirm('\u0627\u06cc\u0646 \u062e\u0631\u06cc\u062f (\u0628\u0627 \u0639\u06a9\u0633\u200c\u0647\u0627\u0634) \u067e\u0627\u06a9 \u0628\u0634\u0647\u061f')) return; (puFind(id).ph || []).forEach(function (f) { try { Android.imgDel(f); } catch (e) {} }); S.pu = S.pu.filter(function (p) { return p.id != id; }); PUO = null; save(); render(); }
           function rProd() {
             var o = prodHist(), ks = Object.keys(o), q = pkey(PUQ);
             var h = '<div class="box"><input placeholder="\ud83d\udd0d \u0627\u0633\u0645 \u06a9\u0627\u0644\u0627 \u06cc\u0627 \u0634\u0631\u06a9\u062a" value="' + esc(PUQ) + '" oninput="PUQ=this.value;var e=$(\'prl\');if(e)e.innerHTML=prodList()"><div id="prl">' + prodList() + '</div></div>';
@@ -2473,6 +2722,76 @@ jobs:
           }
 
           function wakeSkip() { var D = day(SEL); D.wa = 0; D.skw = 1; render(); }
+          /* ---------- invoice photos & visitor ---------- */
+          var PV = null;
+          function imgSrc(id) { try { return Android.imgPath(id) || ''; } catch (e) { return ''; } }
+          function phStrip(list, edit) {
+            var h = '<div class="phs">';
+            (list || []).forEach(function (id, i) {
+              var s = imgSrc(id);
+              h += '<div class="ph" onclick="' + (edit ? 'pvOpenF(' + i + ')' : '') + '">' + (s ? '<img src="' + s + '">' : '<span class="mut sm">\u0639\u06a9\u0633 \u067e\u06cc\u062f\u0627 \u0646\u0634\u062f</span>') + (edit ? '<span class="phx" onclick="event.stopPropagation();phDel(' + i + ')">\u2715</span>' : '') + '</div>';
+            });
+            return h + '</div>';
+          }
+          function phAdd(src) {
+            puGrab();
+            var id = 'f' + uid(), cb = 'c' + (++CBN);
+            CBS[cb] = function (r) {
+              if (!r || !r.ok) { toast(r && r.err ? '\u0628\u0627\u0632 \u0646\u0634\u062f' : '\u0639\u06a9\u0633\u06cc \u062b\u0628\u062a \u0646\u0634\u062f'); return; }
+              if (!PUF) return;
+              if (!PUF.ph) PUF.ph = [];
+              if (!PUF.nph) PUF.nph = [];
+              PUF.ph.push(id); PUF.nph.push(id); render(); toast('\ud83d\udcf8 \u0639\u06a9\u0633 \u0627\u0636\u0627\u0641\u0647 \u0634\u062f');
+            };
+            try { if (src == 'cam') Android.imgCam(id, cb); else Android.imgGal(id, cb); } catch (e) { delete CBS[cb]; toast('\u0641\u0642\u0637 \u062a\u0648 \u0627\u067e \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647'); }
+          }
+          function phDel(i) {
+            if (!confirm('\u0627\u06cc\u0646 \u0639\u06a9\u0633 \u062d\u0630\u0641 \u0628\u0634\u0647\u061f')) return;
+            puGrab(); var id = PUF.ph[i]; PUF.ph.splice(i, 1);
+            if (!PUF.dph) PUF.dph = []; PUF.dph.push(id); render();
+          }
+          function puCancel() {
+            (PUF && PUF.nph || []).forEach(function (id) { try { Android.imgDel(id); } catch (e) {} });
+            PUF = null; render();
+          }
+          function pvOpen(pid, i) { PV = { p: pid, i: i || 0, z: false }; rPv(); }
+          function pvOpenF(i) { puGrab(); PV = { f: 1, i: i, z: false }; rPv(); }
+          function pvClose() { PV = null; var el = $('ov'); el.style.display = 'none'; el.innerHTML = ''; }
+          function rPv() {
+            var p = PV.f ? PUF : puFind(PV.p), l = (p && p.ph) || [];
+            if (!l.length) { pvClose(); return; }
+            if (PV.i >= l.length) PV.i = l.length - 1;
+            var id = l[PV.i], s = imgSrc(id);
+            var h = '<div class="pvw"><div class="row" style="padding:8px"><span class="chip" onclick="pvClose()">\u2715 \u0628\u0633\u062a\u0646</span><span class="sm">' + fa(PV.i + 1) + ' \u0627\u0632 ' + fa(l.length) + '</span>' +
+              '<span>' + (l.length > 1 ? '<span class="chip" onclick="PV.i=(PV.i+' + (l.length - 1) + ')%' + l.length + ';rPv()">&#9654;</span> <span class="chip" onclick="PV.i=(PV.i+1)%' + l.length + ';rPv()">&#9664;</span> ' : '') +
+              '<span class="chip' + (PV.z ? ' on' : '') + '" onclick="PV.z=!PV.z;rPv()">\ud83d\udd0e</span> <span class="chip" onclick="Android.imgView(\'' + id + '\')">\u2197\ufe0f</span></span></div>' +
+              '<div class="pvi" id="pvi">' + (s ? '<img src="' + s + '" style="width:' + (PV.z ? '260%' : '100%') + '" onclick="PV.z=!PV.z;rPv()">' : '<div class="mut" style="padding:30px">\u0639\u06a9\u0633 \u067e\u06cc\u062f\u0627 \u0646\u0634\u062f</div>') + '</div>' +
+              '<div class="pvd">' + (PV.f ? pvData({ co: $('puC') ? PUF.co : '', it: PUF.it, vn: PUF.vn, vp: PUF.vp }) : pvData(p)) + '</div></div>';
+            var el = $('ov'); el.innerHTML = h; el.style.display = 'block';
+          }
+          function pvData(p) {
+            var it = (p.it || []).filter(function (i) { return trim(i.n) || numM(i.b); }), t = puTot({ it: it });
+            return '<div class="sm"><b>\ud83c\udfe2 ' + esc(p.co || '') + '</b>' + (p.t ? ' \u00b7 ' + dtStr(p.t) : '') + (p.vn || p.vp ? ' \u00b7 \ud83d\udc64 ' + esc(p.vn || '') + ' ' + fa(p.vp || '') : '') + '</div>' +
+              '<table><tr><th>\u06a9\u0627\u0644\u0627</th><th>\u062a\u0639\u062f\u0627\u062f</th><th>\u062e\u0631\u06cc\u062f</th><th>\u062c\u0645\u0639</th></tr>' + it.map(function (i) { var q = num(i.q) || 1; return '<tr><td style="text-align:right">' + esc(i.n) + '</td><td>' + fa(q) + '</td><td>' + fmtN(numM(i.b)) + '</td><td>' + fmtN(q * numM(i.b)) + '</td></tr>'; }).join('') +
+              '<tr><td><b>\u062c\u0645\u0639 \u0641\u0627\u06a9\u062a\u0648\u0631</b></td><td></td><td></td><td><b>' + fmtN(t.b) + '</b></td></tr></table><div class="mut sm">\u0639\u06a9\u0633 \u0631\u0648 \u0628\u0627 \u0627\u06cc\u0646 \u0631\u062f\u06cc\u0641\u200c\u0647\u0627 \u0645\u0642\u0627\u06cc\u0633\u0647 \u06a9\u0646. \ud83d\udd0e = \u0628\u0632\u0631\u06af\u200c\u0646\u0645\u0627\u06cc\u06cc\u060c \u2197\ufe0f = \u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 \u0628\u0627 \u06af\u0627\u0644\u0631\u06cc (\u0628\u0627 \u062f\u0648 \u0627\u0646\u06af\u0634\u062a \u0632\u0648\u0645 \u0645\u06cc\u0634\u0647).</div>';
+          }
+          function lastVis(co) {
+            var k = pkey(co), best = null;
+            S.pu.forEach(function (p) { if (pkey(p.co) == k && (p.vp || p.vn) && (!best || p.t > best.t)) best = p; });
+            return best;
+          }
+          function puCoSet(c) { puGrab(); PUF.co = c; visFill(); render(); }
+          function visFill() { if (PUF.vp || PUF.vn) return; var l = lastVis(PUF.co); if (l) { PUF.vn = l.vn || ''; PUF.vp = l.vp || ''; toast('\ud83d\udc64 \u0648\u06cc\u0632\u06cc\u062a\u0648\u0631 \u0642\u0628\u0644\u06cc \u0627\u06cc\u0646 \u0634\u0631\u06a9\u062a \u0627\u0648\u0645\u062f'); } }
+          function visPick() {
+            puGrab(); var id = 'c' + (++CBN);
+            CBS[id] = function (r) { if (!r || !r.n) { toast('\u0645\u062e\u0627\u0637\u0628\u06cc \u0627\u0646\u062a\u062e\u0627\u0628 \u0646\u0634\u062f'); return; } if (!PUF) return; PUF.vn = r.n; PUF.vp = r.ph || ''; render(); toast('\ud83d\udc64 ' + r.n); };
+            try { Android.pickContact(id); } catch (e) { delete CBS[id]; toast('\u0641\u0642\u0637 \u062a\u0648 \u0627\u067e \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647'); }
+          }
+          function visBox(x) {
+            return '<div class="shf"><b class="sm">\ud83d\udc64 \u0648\u06cc\u0632\u06cc\u062a\u0648\u0631 / \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0634\u0631\u06a9\u062a</b><div class="row" style="flex-wrap:nowrap"><input id="puVn" placeholder="\u0627\u0633\u0645" value="' + esc(x.vn || '') + '" style="flex:1"><input id="puVp" placeholder="\u0634\u0645\u0627\u0631\u0647" inputmode="tel" style="flex:1;direction:ltr" value="' + esc(x.vp || '') + '"></div>' +
+              '<button class="btn g s" onclick="visPick()">\ud83d\udcc7 \u0627\u0632 \u0645\u062e\u0627\u0637\u0628\u06cc\u0646</button></div>';
+          }
+
           /* ---------- start ---------- */
           if (!S.v2) { for (var i0 = 0; i0 < 7; i0++) { try { Android.cancelAlarm('m' + i0); Android.cancelAlarm('n' + i0); } catch (e) {} } S.v2 = 1; S.v = 2; sv('life1', S); }
           snap();
