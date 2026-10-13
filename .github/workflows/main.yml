@@ -104,7 +104,8 @@ jobs:
               </queries>
               <application android:label="&#x632;&#x646;&#x62f;&#x6af;&#x6cc; &#x645;&#x646;" android:allowBackup="true"
                   android:theme="@android:style/Theme.Material.NoActionBar">
-                  <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
+                  <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize" android:launchMode="singleTask"
+                      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
@@ -207,6 +208,7 @@ jobs:
               }
               @Override
               protected void onPause() {
+                  if (web != null) web.evaluateJavascript("window.draftSave && draftSave()", null);
                   super.onPause();
                   if (web != null) { web.onPause(); web.pauseTimers(); }
               }
@@ -250,6 +252,7 @@ jobs:
               }
 
               void imgResult(final int rq, int rs, final Intent data) {
+                  if (imgId == null || imgId.length() == 0) imgId = prefs.getString("__imgid", "");
                   final String cb = imgCb, id = imgId;
                   if (rs != RESULT_OK) { jsCb(cb, "{\"ok\":0}"); return; }
                   new Thread(new Runnable() {
@@ -270,6 +273,7 @@ jobs:
                                   out.close();
                               }
                               if (tmp != null && tmp.exists() && tmp.length() > 0) ok = shrink(tmp, imgFile(id));
+                              if (ok) prefs.edit().putString("__imgp", id).apply();
                           } catch (Exception e) {
                               ok = false;
                           }
@@ -555,6 +559,7 @@ jobs:
                   @JavascriptInterface
                   public void imgCam(final String id, final String cb) {
                       imgId = id;
+                      prefs.edit().putString("__imgid", id).apply();
                       imgCb = cb;
                       runOnUiThread(new Runnable() {
                           public void run() {
@@ -577,6 +582,7 @@ jobs:
                   @JavascriptInterface
                   public void imgGal(final String id, final String cb) {
                       imgId = id;
+                      prefs.edit().putString("__imgid", id).apply();
                       imgCb = cb;
                       runOnUiThread(new Runnable() {
                           public void run() {
@@ -590,6 +596,13 @@ jobs:
                               }
                           }
                       });
+                  }
+
+                  @JavascriptInterface
+                  public String imgTake() {
+                      String v = prefs.getString("__imgp", "");
+                      prefs.edit().remove("__imgp").apply();
+                      return v;
                   }
 
                   @JavascriptInterface
@@ -1533,6 +1546,7 @@ jobs:
             if (!S.ppl) S.ppl = [];
             if (!S.nd) S.nd = [];
             if (!S.pu) S.pu = [];
+            S.pu.forEach(function (p) { (p.it || []).forEach(function (i) { if (!i.id) i.id = 'i' + Date.now().toString(36) + Math.floor(Math.random() * 1e8).toString(36); }); });
             if (!S.secs) S.secs = [{ id: 'shop', n: '\ud83c\udfea \u0645\u063a\u0627\u0632\u0647' }, { id: 'home', n: '\ud83c\udfe0 \u062e\u0627\u0646\u0647' }, { id: 'me', n: '\ud83d\udc64 \u0634\u062e\u0635\u06cc' }];
             if (!S.sites) S.sites = [
               { id: 'okala', n: '\u0627\u0648\u06a9\u0627\u0644\u0627', u: 'https://www.okala.com', p: '' },
@@ -1806,6 +1820,7 @@ jobs:
             var j = jOf(SEL), t = SEL == dk();
             $('dt').innerHTML = '\ud83d\udcc5 ' + (t ? '\u0627\u0645\u0631\u0648\u0632\u060c ' : '') + WD[kDate(SEL).getDay()] + ' ' + fa(j[2]) + ' ' + MON[j[1] - 1];
             $('ttl').textContent = { today: '\u2600\ufe0f \u0631\u0648\u0632', mood: '\ud83d\udcad \u0627\u062d\u0648\u0627\u0644', night: '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc', trend: '\ud83d\udcca \u062a\u062d\u0644\u06cc\u0644', ai: '\ud83d\udcca \u062a\u062d\u0644\u06cc\u0644', set: '\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a', ppl: '\ud83d\udc65 \u0622\u062f\u0645\u200c\u0647\u0627', need: '\ud83d\uded2 \u062e\u0631\u06cc\u062f \u0648 \u0646\u06cc\u0627\u0632\u0647\u0627' }[TAB];
+            draftSoon();
             $('pg').innerHTML = { today: rToday, mood: rMood, night: rNight, trend: rTrendAll, ai: rTrendAll, set: rSet, ppl: rPpl, need: rBuy }[TAB]();
           }
 
@@ -1857,6 +1872,7 @@ jobs:
             h += rShifts(D);
             h += '<div id="dyn">' + rDyn() + '</div>';
             h += rRoutines(D, k);
+            if (isT) h += xWarnBox();
             h += rSites(D, k);
             var tn = S.nd.filter(function (n) { return !n.d && n.dd == k; }).sort(function (a, b) { return tmin(a.tm || '23:59') - tmin(b.tm || '23:59'); });
             if (tn.length) h += '<div class="box"><div class="row"><h3>\ud83d\uded2 \u062e\u0631\u06cc\u062f\u0647\u0627\u06cc \u0627\u06cc\u0646 \u0631\u0648\u0632</h3><span class="chip" onclick="go(\'need\')">\u0647\u0645\u0647</span></div>' + tn.map(nRow).join('') + '</div>';
@@ -2248,6 +2264,7 @@ jobs:
               S.ppl.forEach(function (p) { (p.lg || []).forEach(function (e) { if (e.due == k && e.dal && !e.dn) add('d' + e.id, dueTs(e), (LG[e.ty][2] > 0 ? '\ud83d\udcb0 \u0633\u0631\u0631\u0633\u06cc\u062f \u0637\u0644\u0628 \u0627\u0632 ' : '\ud83d\udcb8 \u0633\u0631\u0631\u0633\u06cc\u062f \u0628\u062f\u0647\u06cc \u0628\u0647 ') + p.n, fmtN(numM(e.a)) + ' \u062a\u0648\u0645\u0627\u0646' + (e.it ? ' \u00b7 ' + e.it : '')); }); });
               if (i < 2) rtFor(k).forEach(function (x) { if (x.r.al && !(D && D.rt[x.key])) add('r' + k + x.key, tsOf(k, x.tm), '\ud83d\udccc ' + x.r.n, '\u0633\u0627\u0639\u062a ' + fa(x.tm) + '\u060c \u0627\u0646\u062c\u0627\u0645\u0634 \u062f\u0627\u062f\u06cc \u062a\u06cc\u06a9 \u0628\u0632\u0646', x.r.vc); });
             })(addD(k0, i), i);
+            xAlarms(add);
             return w;
           }
           function remind() {
@@ -2263,7 +2280,8 @@ jobs:
 
           /* ---------- http + update ---------- */
           var CBS = {}, CBN = 0;
-          window.__cb = function (id, s) { var f = CBS[id]; delete CBS[id]; var r = {}; try { r = JSON.parse(s); } catch (e) {} if (f) f(r); };
+          window.__cb = function (id, s) { var f = CBS[id]; delete CBS[id]; var r = {}; try { r = JSON.parse(s); } catch (e) {} if (f) f(r); else pendCheck(); };
+          function pendCheck() { if (!PUF) return; var p = ''; try { p = Android.imgTake(); } catch (e) {} if (p && (PUF.ph || []).indexOf(p) < 0) { puGrab(); PUF.ph = (PUF.ph || []).concat([p]); PUF.nph = (PUF.nph || []).concat([p]); render(); toast('\ud83d\udcf8 \u0639\u06a9\u0633 \u0627\u0636\u0627\u0641\u0647 \u0634\u062f'); } }
           function http(url, fn) { var id = 'c' + (++CBN); CBS[id] = fn; try { Android.get(url, id); } catch (e) { delete CBS[id]; fn({ status: 0 }); } }
           function checkUpdate(manual) {
             if (!BUILD || REPO.indexOf('/') < 0) { if (manual) toast('\u0622\u067e\u062f\u06cc\u062a \u0641\u0642\u0637 \u062a\u0648 \u0646\u0633\u062e\u0647 \u0633\u0627\u062e\u062a\u0647\u200c\u0634\u062f\u0647 \u06a9\u0627\u0631 \u0645\u06cc\u200c\u06a9\u0646\u0647'); return; }
@@ -2681,7 +2699,7 @@ jobs:
 
           /* ---------- purchases from companies ---------- */
           var BSUB = 'need', PUF = null, PUO = null, PUQ = '';
-          function pkey(n) { return trim(String(n || '')).replace(/\s+/g, ' ').toLowerCase(); }
+          function pkey(n) { return trim(String(n || '')).replace(/[\u064a\u0649]/g, '\u06cc').replace(/\u0643/g, '\u06a9').replace(/[\u200c\u200f\u200e]/g, ' ').replace(/\s+/g, ' ').toLowerCase(); }
           function mg(b, s) { b = numM(b); s = numM(s); return s > 0 ? (s - b) / s * 100 : 0; }
           function mgTxt(b, s) { var m = mg(b, s); if (!numM(s)) return '\u2014'; return '<b style="color:' + (m >= 20 ? '#4ED38A' : m >= 10 ? '#E0A040' : '#FF7B7B') + '">' + fa(r1(m)) + '\u066a</b>'; }
           function puTot(p) { var b = 0, s = 0; p.it.forEach(function (i) { var q = num(i.q) || 1; b += q * numM(i.b); s += q * numM(i.s); }); return { b: b, s: s, p: s - b, m: s > 0 ? (s - b) / s * 100 : 0 }; }
@@ -2689,16 +2707,18 @@ jobs:
           function prodHist() {
             var o = {};
             S.pu.slice().sort(function (a, b) { return a.t - b.t; }).forEach(function (p) {
-              p.it.forEach(function (i) { var k = pkey(i.n); if (!k) return; (o[k] = o[k] || { n: i.n, h: [] }).h.push({ t: p.t, co: p.co, b: numM(i.b), s: numM(i.s), q: num(i.q) || 1 }); o[k].n = i.n; });
+              p.it.forEach(function (i) { var k = pkey(i.n); if (!k) return; (o[k] = o[k] || { n: i.n, h: [] }).h.push({ t: p.t, co: p.co, b: numM(i.b), s: numM(i.s), q: num(i.q) || 1, pid: p.id, iid: i.id, exp: i.exp, out: i.out }); o[k].n = i.n; });
             });
             return o;
           }
           function lastOf(name) { var h = prodHist()[pkey(name)]; return h ? h.h[h.h.length - 1] : null; }
           function rBuy() {
-            var subs = [['need', '\ud83d\udccb \u0646\u06cc\u0627\u0632\u0647\u0627'], ['pu', '\ud83e\uddfe \u062e\u0631\u06cc\u062f \u0627\u0632 \u0634\u0631\u06a9\u062a\u200c\u0647\u0627'], ['pr', '\ud83d\udce6 \u06a9\u0627\u0644\u0627\u0647\u0627 \u0648 \u0633\u0648\u062f']];
+            var nx = xList().filter(function (x) { return x.d <= 30; }).length;
+            var subs = [['need', '\ud83d\udccb \u0646\u06cc\u0627\u0632\u0647\u0627'], ['pu', '\ud83e\uddfe \u062e\u0631\u06cc\u062f \u0627\u0632 \u0634\u0631\u06a9\u062a\u200c\u0647\u0627'], ['pr', '\ud83d\udce6 \u06a9\u0627\u0644\u0627\u0647\u0627 \u0648 \u0633\u0648\u062f'], ['ex', '\u23f3 \u0627\u0646\u0642\u0636\u0627' + (nx ? ' (' + fa(nx) + ')' : '')]];
             var h = '<div class="chips" style="margin:8px 12px 0">' + subs.map(function (s) { return '<span class="chip' + (BSUB == s[0] ? ' on' : '') + '" onclick="BSUB=\'' + s[0] + '\';PUF=null;PUO=null;render()">' + s[1] + '</span>'; }).join('') + '</div>';
             if (BSUB == 'pu') return h + rPu();
             if (BSUB == 'pr') return h + rProd();
+            if (BSUB == 'ex') return h + rExp();
             return h + rNeed();
           }
           function rPu() {
@@ -2718,7 +2738,7 @@ jobs:
                 '<div class="sm">' + ((p.ph || []).length ? '\ud83d\udcf8 ' + fa(p.ph.length) + ' \u00b7 ' : '') + (p.vn ? '\ud83d\udc64 ' + esc(p.vn) + ' \u00b7 ' : '') + (p.pd ? '<span style="color:#4ED38A">\u2705 \u062a\u0633\u0648\u06cc\u0647</span>' : '<span style="color:#FF7B7B">\u23f3 \u067e\u0631\u062f\u0627\u062e\u062a\u200c\u0646\u0634\u062f\u0647' + (p.due ? ' \u00b7 \u0633\u0631\u0631\u0633\u06cc\u062f ' + esc(p.due) : '') + '</span>') + '</div>';
               if (op) {
                 h += '<table style="margin-top:6px"><tr><th>\u06a9\u0627\u0644\u0627</th><th>\u062a\u0639\u062f\u0627\u062f</th><th>\u062e\u0631\u06cc\u062f</th><th>\u0641\u0631\u0648\u0634</th><th>\u0633\u0648\u062f \u0648\u0627\u062d\u062f</th><th>\u062d\u0627\u0634\u06cc\u0647</th></tr>' + p.it.map(function (i) {
-                  return '<tr><td style="text-align:right">' + esc(i.n) + '</td><td>' + fa(num(i.q) || 1) + '</td><td>' + fmtN(numM(i.b)) + '</td><td>' + fmtN(numM(i.s)) + '</td><td>' + fmtN(numM(i.s) - numM(i.b)) + '</td><td>' + mgTxt(i.b, i.s) + '</td></tr>';
+                  return '<tr><td style="text-align:right">' + esc(i.n) + (i.exp ? '<br><span class="sm" style="color:' + (i.out ? '#7F93AA' : xLvl(xDays(i.exp))[2]) + '">' + (i.out ? '\ud83d\udce6 \u062a\u0645\u0648\u0645 \u0634\u062f' : '\u23f3 ' + jStr(i.exp)) + '</span>' : '') + '</td><td>' + fa(num(i.q) || 1) + '</td><td>' + fmtN(numM(i.b)) + '</td><td>' + fmtN(numM(i.s)) + '</td><td>' + fmtN(numM(i.s) - numM(i.b)) + '</td><td>' + mgTxt(i.b, i.s) + '</td></tr>';
                 }).join('') + '<tr><td><b>\u062c\u0645\u0639</b></td><td></td><td><b>' + fmtN(t.b) + '</b></td><td><b>' + fmtN(t.s) + '</b></td><td><b>' + fmtN(t.p) + '</b></td><td>' + mgTxt(t.b, t.s) + '</td></tr></table>' +
                   (p.x ? '<div class="mut sm">' + esc(p.x) + '</div>' : '') +
                   (p.vn || p.vp ? '<div class="row" style="margin-top:6px"><span>\ud83d\udc64 ' + esc(p.vn || '') + ' <span style="direction:ltr">' + fa(p.vp || '') + '</span></span>' + (p.vp ? '<span><button class="btn s" onclick="Android.dial(\'' + digits(p.vp) + '\')">\ud83d\udcde \u062a\u0645\u0627\u0633</button> <button class="btn g s" onclick="cpTxt(\'' + digits(p.vp) + '\')">\ud83d\udccb</button></span>' : '') + '</div>' : '') +
@@ -2731,7 +2751,7 @@ jobs:
           }
           function puNew() { PUF = { id: '', co: '', it: [{ n: '', q: '', b: '', s: '' }], pd: true, due: '', x: '', vn: '', vp: '', ph: [] }; render(); }
           function puEdit(id) { var p = puFind(id); PUF = JSON.parse(JSON.stringify(p)); render(); }
-          function puCopy(id) { var p = puFind(id); PUF = JSON.parse(JSON.stringify(p)); PUF.id = ''; PUF.it.forEach(function (i) { i.q = ''; }); PUF.pd = true; PUF.due = ''; PUF.ph = []; render(); toast('\ud83d\udccb \u06a9\u0627\u0644\u0627\u0647\u0627 \u0648 \u0642\u06cc\u0645\u062a\u200c\u0647\u0627\u06cc \u0642\u0628\u0644\u06cc \u0627\u0648\u0645\u062f\u061b \u062a\u0639\u062f\u0627\u062f\u0647\u0627 \u0631\u0648 \u0628\u0632\u0646'); }
+          function puCopy(id) { var p = puFind(id); PUF = JSON.parse(JSON.stringify(p)); PUF.id = ''; PUF.it.forEach(function (i) { i.q = ''; i.id = ''; i.pdt = ''; i.exp = ''; i.out = 0; }); PUF.pd = true; PUF.due = ''; PUF.ph = []; render(); toast('\ud83d\udccb \u06a9\u0627\u0644\u0627\u0647\u0627 \u0648 \u0642\u06cc\u0645\u062a\u200c\u0647\u0627\u06cc \u0642\u0628\u0644\u06cc \u0627\u0648\u0645\u062f\u061b \u062a\u0639\u062f\u0627\u062f\u0647\u0627 \u0631\u0648 \u0628\u0632\u0646'); }
           function puFind(id) { for (var i = 0; i < S.pu.length; i++) if (S.pu[i].id == id) return S.pu[i]; return null; }
           function puForm() {
             var x = PUF, cl = cos();
@@ -2743,6 +2763,7 @@ jobs:
             x.it.forEach(function (i, n) {
               h += '<div class="shf"><div class="row" style="flex-wrap:nowrap"><b class="sm">' + fa(n + 1) + '</b><input id="piN' + n + '" value="' + esc(i.n) + '" placeholder="\u0627\u0633\u0645 \u06a9\u0627\u0644\u0627 (\u0645\u062b\u0644\u0627\u064b \u0648\u06cc\u0646\u0633\u062a\u0648\u0646 \u0627\u0648\u0644\u062a\u0631\u0627)" onchange="piFill(' + n + ')" style="flex:1">' + (x.it.length > 1 ? '<span class="chip" onclick="puGrab();PUF.it.splice(' + n + ',1);render()">\u2715</span>' : '') + '</div>' +
                 '<div class="row" style="flex-wrap:nowrap"><div class="f1"><label>\u062a\u0639\u062f\u0627\u062f</label><input id="piQ' + n + '" inputmode="decimal" value="' + esc(i.q) + '" oninput="piCalc(' + n + ')"></div><div class="f1"><label>\u062e\u0631\u06cc\u062f</label><input id="piB' + n + '" inputmode="numeric" value="' + esc(i.b) + '" oninput="piCalc(' + n + ')"></div><div class="f1"><label>\u0641\u0631\u0648\u0634</label><input id="piS' + n + '" inputmode="numeric" value="' + esc(i.s) + '" oninput="piCalc(' + n + ')"></div></div>' +
+                '<div class="row" style="flex-wrap:nowrap;margin-top:4px"><span class="sm">\u062a\u0648\u0644\u06cc\u062f</span>' + dField('piP' + n, 'piPl' + n, i.pdt, '\ud83d\udcc5 \u2014') + '<span class="sm">\u0627\u0646\u0642\u0636\u0627</span>' + dField('piE' + n, 'piEl' + n, i.exp, '\ud83d\udcc5 \u2014') + '</div>' +
                 '<div class="sm" id="piM' + n + '">' + piInfo(i) + '</div></div>';
             });
             h += '<button class="btn g s" onclick="puGrab();PUF.it.push({n:\'\',q:\'\',b:\'\',s:\'\'});render();var e=$(\'piN' + x.it.length + '\');if(e)e.focus()">\u2795 \u06a9\u0627\u0644\u0627\u06cc \u062f\u06cc\u06af\u0647</button>' +
@@ -2763,7 +2784,7 @@ jobs:
           function puGrab() {
             if (!$('puC')) return;
             PUF.co = $('puC').value; PUF.x = $('puX').value; if ($('puVn')) { PUF.vn = $('puVn').value; PUF.vp = $('puVp').value; } PUF.pd = $('puP').checked; if ($('puD')) PUF.due = $('puD').value;
-            PUF.it.forEach(function (i, n) { i.n = $('piN' + n).value; i.q = $('piQ' + n).value; i.b = $('piB' + n).value; i.s = $('piS' + n).value; });
+            PUF.it.forEach(function (i, n) { i.n = $('piN' + n).value; i.q = $('piQ' + n).value; i.b = $('piB' + n).value; i.s = $('piS' + n).value; if ($('piE' + n)) { i.pdt = $('piP' + n).value; i.exp = $('piE' + n).value; } });
           }
           function piCalc(n) { puGrab(); $('piM' + n).innerHTML = piInfo(PUF.it[n]); $('puT').innerHTML = puTotH(); }
           function piFill(n) {
@@ -2775,7 +2796,8 @@ jobs:
           function puSave() {
             puGrab();
             var co = trim(PUF.co); if (!co) { toast('\u0627\u0633\u0645 \u0634\u0631\u06a9\u062a \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
-            var it = PUF.it.filter(function (i) { return trim(i.n); }).map(function (i) { return { n: trim(i.n), q: trim(i.q), b: numM(i.b), s: numM(i.s) }; });
+            var it = PUF.it.filter(function (i) { return trim(i.n); }).map(function (i) { return { id: i.id || 'i' + uid(), n: trim(i.n), q: trim(i.q), b: numM(i.b), s: numM(i.s), pdt: i.pdt || '', exp: i.exp || '', out: i.out || 0 }; });
+            if (it.some(function (i) { return i.pdt && i.exp && i.exp < i.pdt; })) { toast('\u062a\u0627\u0631\u06cc\u062e \u0627\u0646\u0642\u0636\u0627 \u0642\u0628\u0644 \u0627\u0632 \u062a\u0648\u0644\u06cc\u062f\u0647! \u0686\u06a9\u0634 \u06a9\u0646'); return; }
             if (!it.length) { toast('\u062d\u062f\u0627\u0642\u0644 \u06cc\u0647 \u06a9\u0627\u0644\u0627 \u0628\u0646\u0648\u06cc\u0633'); return; }
             if (it.some(function (i) { return !i.b; })) { toast('\u0642\u06cc\u0645\u062a \u062e\u0631\u06cc\u062f \u0647\u0645\u0647 \u06a9\u0627\u0644\u0627\u0647\u0627 \u0631\u0648 \u0628\u0646\u0648\u06cc\u0633'); return; }
             var p = PUF.id ? puFind(PUF.id) : null;
@@ -2791,17 +2813,26 @@ jobs:
           function rProd() {
             var o = prodHist(), ks = Object.keys(o), q = pkey(PUQ);
             var h = '<div class="box"><input placeholder="\ud83d\udd0d \u0627\u0633\u0645 \u06a9\u0627\u0644\u0627 \u06cc\u0627 \u0634\u0631\u06a9\u062a" value="' + esc(PUQ) + '" oninput="PUQ=this.value;var e=$(\'prl\');if(e)e.innerHTML=prodList()"><div id="prl">' + prodList() + '</div></div>';
-            return h + '<div class="mut sm" style="margin:0 14px">\u062d\u0627\u0634\u06cc\u0647 \u0627\u0632 \u0628\u0627\u0644\u0627 \u0628\u0647 \u067e\u0627\u06cc\u06cc\u0646 (\u0631\u0648\u06cc \u0641\u0631\u0648\u0634). \u2b06\ufe0f \u06cc\u0639\u0646\u06cc \u0622\u062e\u0631\u06cc\u0646 \u062e\u0631\u06cc\u062f \u06af\u0631\u0648\u0646\u200c\u062a\u0631 \u0627\u0632 \u062f\u0641\u0639\u0647 \u0642\u0628\u0644 \u0628\u0648\u062f\u0647.</div>';
+            return h + '<div class="mut sm" style="margin:0 14px">\u0642\u06cc\u0645\u062a \u0648 \u062d\u0627\u0634\u06cc\u0647 \u0647\u0631 \u06a9\u0627\u0644\u0627 \u0627\u0632 \u062c\u062f\u06cc\u062f\u062a\u0631\u06cc\u0646 \u0641\u0627\u06a9\u062a\u0648\u0631\u06cc \u06a9\u0647 \u062f\u0627\u0631\u0647 \u0645\u06cc\u0627\u062f\u061b \u0641\u0627\u06a9\u062a\u0648\u0631\u0647\u0627\u06cc \u0642\u062f\u06cc\u0645\u06cc \u0641\u0642\u0637 \u062a\u0648 \u062a\u0627\u0631\u06cc\u062e\u0686\u0647\u200c\u0646. \u0631\u0648\u06cc \u0647\u0631 \u06a9\u0627\u0644\u0627 \u0628\u0632\u0646 \u062a\u0627 \u062a\u0627\u0631\u06cc\u062e\u0686\u0647\u060c \u0648\u06cc\u0631\u0627\u06cc\u0634 \u0648 \u062d\u0630\u0641 \u0631\u0648 \u0628\u0628\u06cc\u0646\u06cc. \u2b06\ufe0f \u06cc\u0639\u0646\u06cc \u0622\u062e\u0631\u06cc\u0646 \u062e\u0631\u06cc\u062f \u06af\u0631\u0648\u0646\u200c\u062a\u0631 \u0627\u0632 \u062f\u0641\u0639\u0647 \u0642\u0628\u0644 \u0628\u0648\u062f\u0647.</div>';
           }
           function prodList() {
             var o = prodHist(), q = pkey(PUQ), ks = Object.keys(o).filter(function (k) { return !q || k.indexOf(q) >= 0 || o[k].h.some(function (x) { return pkey(x.co).indexOf(q) >= 0; }); });
             if (!ks.length) return '<div class="mut">' + (Object.keys(o).length ? '\u067e\u06cc\u062f\u0627 \u0646\u0634\u062f.' : '\u0628\u0627 \u062b\u0628\u062a \u062e\u0631\u06cc\u062f\u060c \u06a9\u0627\u0644\u0627\u0647\u0627 \u0627\u06cc\u0646\u062c\u0627 \u062c\u0645\u0639 \u0645\u06cc\u0634\u0646.') + '</div>';
             ks.sort(function (a, b) { var x = o[a].h[o[a].h.length - 1], y = o[b].h[o[b].h.length - 1]; return mg(y.b, y.s) - mg(x.b, x.s); });
-            var h = '<table><tr><th>\u06a9\u0627\u0644\u0627</th><th>\u062e\u0631\u06cc\u062f</th><th>\u0641\u0631\u0648\u0634</th><th>\u062d\u0627\u0634\u06cc\u0647</th><th>\u062a\u063a\u06cc\u06cc\u0631</th></tr>';
+            var sm = 0, sn = 0; ks.forEach(function (k) { var l = prodLatest(o[k]); if (l.s) { sm += mg(l.b, l.s); sn++; } });
+            var h = '<div class="row" style="margin:6px 0">' + cell('\u06a9\u0627\u0644\u0627\u0647\u0627', fa(ks.length)) + cell('\u0645\u06cc\u0627\u0646\u06af\u06cc\u0646 \u062d\u0627\u0634\u06cc\u0647 (\u0622\u062e\u0631\u06cc\u0646 \u0641\u0627\u06a9\u062a\u0648\u0631\u0647\u0627)', sn ? fa(r1(sm / sn)) + '\u066a' : '\u2014') + '</div>';
+            h += '<table><tr><th>\u06a9\u0627\u0644\u0627 (\u0622\u062e\u0631\u06cc\u0646 \u0641\u0627\u06a9\u062a\u0648\u0631)</th><th>\u062e\u0631\u06cc\u062f</th><th>\u0641\u0631\u0648\u0634</th><th>\u062d\u0627\u0634\u06cc\u0647</th><th>\u062a\u063a\u06cc\u06cc\u0631</th></tr>';
             ks.forEach(function (k) {
               var hh = o[k].h, l = hh[hh.length - 1], p = hh.length > 1 ? hh[hh.length - 2] : null, ch = '';
               if (p && p.b && l.b != p.b) { var d = (l.b - p.b) / p.b * 100; ch = '<span style="color:' + (d > 0 ? '#FF7B7B' : '#4ED38A') + '">' + (d > 0 ? '\u2b06\ufe0f' : '\u2b07\ufe0f') + fa(r1(Math.abs(d))) + '\u066a</span>'; }
-              h += '<tr><td style="text-align:right">' + esc(o[k].n) + '<br><span class="mut sm">\ud83c\udfe2 ' + esc(l.co) + ' \u00b7 ' + jStr(dk(l.t)) + ' \u00b7 ' + fa(hh.length) + ' \u0628\u0627\u0631</span></td><td>' + fmtN(l.b) + '</td><td>' + (l.s ? fmtN(l.s) : '\u2014') + '</td><td>' + mgTxt(l.b, l.s) + '</td><td>' + ch + '</td></tr>';
+              h += '<tr onclick="PRO=PRO==\'' + k.replace(/'/g, '') + '\'?null:\'' + k.replace(/'/g, '') + '\';PRE=null;var e=$(\'prl\');if(e)e.innerHTML=prodList()"><td style="text-align:right">' + esc(o[k].n) + '<br><span class="mut sm">\ud83d\udcc5 ' + jStr(dk(l.t), true) + ' \u00b7 \ud83c\udfe2 ' + esc(l.co) + (hh.length > 1 ? ' \u00b7 ' + fa(hh.length) + ' \u0628\u0627\u0631' : '') + '</span>' + (l.exp && !l.out ? '<br><span class="sm" style="color:' + xLvl(xDays(l.exp))[2] + '">\u23f3 ' + jStr(l.exp) + '</span>' : '') + '</td><td>' + fmtN(l.b) + '</td><td>' + (l.s ? fmtN(l.s) : '\u2014') + '</td><td>' + mgTxt(l.b, l.s) + '</td><td>' + ch + ' \u25be</td></tr>';
+              if (PRO == k.replace(/'/g, '')) {
+                h += '<tr><td colspan="5" style="background:#0F2138;text-align:right">' + hh.slice().reverse().map(function (x, j) {
+                  if (PRE && PRE.iid == x.iid) return '<div class="box inn"><label>\u0627\u0633\u0645</label><input id="preN" value="' + esc(PRE.n) + '"><div class="row" style="flex-wrap:nowrap"><div class="f1"><label>\u062e\u0631\u06cc\u062f</label><input id="preB" inputmode="numeric" value="' + esc(PRE.b) + '"></div><div class="f1"><label>\u0641\u0631\u0648\u0634</label><input id="preS" inputmode="numeric" value="' + esc(PRE.s) + '"></div></div><button class="btn s" onclick="prSave()">\ud83d\udcbe \u0630\u062e\u06cc\u0631\u0647</button> <button class="btn g s" onclick="PRE=null;var e=$(\'prl\');if(e)e.innerHTML=prodList()">\u0627\u0646\u0635\u0631\u0627\u0641</button></div>';
+                  return '<div class="task"><div class="row"><span class="sm">' + (j == 0 ? '\ud83c\udd95 ' : '') + '\ud83d\udcc5 ' + jStr(dk(x.t), true) + ' \u00b7 \ud83c\udfe2 ' + esc(x.co) + '</span><span class="sm">' + fmtN(x.b) + ' \u2190 ' + (x.s ? fmtN(x.s) : '\u2014') + ' \u00b7 ' + mgTxt(x.b, x.s) + '</span></div>' +
+                    '<div><span class="chip" onclick="event.stopPropagation();prEdit(\'' + x.pid + '\',\'' + x.iid + '\')">\u270f\ufe0f \u0648\u06cc\u0631\u0627\u06cc\u0634</span> <span class="chip" onclick="event.stopPropagation();prDel(\'' + x.pid + '\',\'' + x.iid + '\')">\ud83d\uddd1 \u062d\u0630\u0641</span></div></div>';
+                }).join('') + '<div class="mut sm">\u0633\u0648\u062f \u0648 \u062d\u0627\u0634\u06cc\u0647 \u0647\u0645\u06cc\u0634\u0647 \u0627\u0632 \u062c\u062f\u06cc\u062f\u062a\u0631\u06cc\u0646 \u0641\u0627\u06a9\u062a\u0648\u0631 (\ud83c\udd95) \u062d\u0633\u0627\u0628 \u0645\u06cc\u0634\u0647.</div></td></tr>';
+              }
             });
             return h + '</table>';
           }
@@ -2822,6 +2853,7 @@ jobs:
             puGrab();
             var id = 'f' + uid(), cb = 'c' + (++CBN);
             CBS[cb] = function (r) {
+              try { Android.imgTake(); } catch (e) {}
               if (!r || !r.ok) { toast(r && r.err ? '\u0628\u0627\u0632 \u0646\u0634\u062f' : '\u0639\u06a9\u0633\u06cc \u062b\u0628\u062a \u0646\u0634\u062f'); return; }
               if (!PUF) return;
               if (!PUF.ph) PUF.ph = [];
@@ -2877,14 +2909,112 @@ jobs:
               '<button class="btn g s" onclick="visPick()">\ud83d\udcc7 \u0627\u0632 \u0645\u062e\u0627\u0637\u0628\u06cc\u0646</button></div>';
           }
 
+          /* ---------- keep screen & drafts across restarts ---------- */
+          var DRT = null, RESTORING = false;
+          function uiState() {
+            var f = {}, pg = $('pg'), els = pg && pg.querySelectorAll ? pg.querySelectorAll('input,textarea') : [];
+            for (var i = 0; i < els.length; i++) { var e = els[i]; if (!e.id) continue; f[e.id] = e.type == 'checkbox' ? (e.checked ? 1 : 0) : e.value; }
+            return { t: Date.now(), TAB: TAB, SEL: SEL, BSUB: BSUB, PP: PP, PSUB: PSUB, PADD: PADD, FORM: FORM, EDIT: EDIT, FID: FID, RP: RP, PUF: PUF, PUO: PUO, NF: NF, PF: PF, RE: RE, MF: MF, WEDIT: WEDIT, NSEC: NSEC, NSITE: NSITE, XF: XF, PRO: PRO, PRE: PRE, VC: VC ? { id: VC.id, has: VC.has } : null, y: window.scrollY || 0, f: f };
+          }
+          function draftSave() { if (RESTORING) return; try { sv('ui1', uiState()); } catch (e) {} }
+          window.draftSave = draftSave;
+          function draftSoon() { clearTimeout(DRT); DRT = setTimeout(draftSave, 300); }
+          function draftLoad() {
+            var u = ld('ui1', null);
+            if (!u || !u.TAB || Date.now() - (u.t || 0) > 36 * 3600000) return false;
+            RESTORING = true;
+            TAB = u.TAB; SEL = u.SEL || dk(); BSUB = u.BSUB || 'need'; PP = u.PP || null; PSUB = u.PSUB || 'info'; PADD = u.PADD || ''; FORM = !!u.FORM; EDIT = u.EDIT || null; FID = u.FID || ''; RP = !!u.RP;
+            PUF = u.PUF || null; PUO = u.PUO || null; NF = u.NF || null; PF = u.PF || null; RE = u.RE || null; MF = u.MF && u.MF.ks ? u.MF : null; WEDIT = !!u.WEDIT; NSEC = u.NSEC || ''; NSITE = u.NSITE || ''; XF = u.XF || ''; PRO = u.PRO || null; PRE = u.PRE || null; VC = u.VC || null;
+            if (VC) VC.has = vcHas(VC.id);
+            if (PUF) { var pend = ''; try { pend = Android.imgTake(); } catch (e) {} if (pend && (PUF.ph || []).indexOf(pend) < 0) { PUF.ph = (PUF.ph || []).concat([pend]); PUF.nph = (PUF.nph || []).concat([pend]); } }
+            if (PP && !pFind(PP)) PP = null;
+            if (EDIT && !findT(day(SEL), EDIT)) EDIT = null;
+            render();
+            var f = u.f || {};
+            Object.keys(f).forEach(function (id) { var e = document.getElementById(id); if (!e || !e.tagName) return; if (e.type == 'checkbox') e.checked = !!f[id]; else e.value = f[id]; });
+            var hooks = [['lgT', function (v) { if (v) lgTy(v); }], ['vsS', function (v) { if (+v) vsSc(+v); }], ['lgD', function (v) { if (v && $('lgDl')) $('lgDl').innerHTML = '\ud83d\udcc5 ' + jStr(v, true); }], ['nfD', function (v) { if (v && $('nfDl')) $('nfDl').innerHTML = '\ud83d\udcc5 ' + jStr(v, true); }], ['lgA', function () { if ($('lgAv')) lgShow(); }]];
+            hooks.forEach(function (h) { var e = document.getElementById(h[0]); if (e && e.tagName && f[h[0]] !== undefined) { try { h[1](f[h[0]]); } catch (x) {} } });
+            if (PUF && $('puT') && $('puT').tagName) { try { puGrab(); PUF.it.forEach(function (i, n) { var m = $('piM' + n); if (m) m.innerHTML = piInfo(i); }); $('puT').innerHTML = puTotH(); } catch (x) {} }
+            setTimeout(function () { window.scrollTo(0, u.y || 0); }, 30);
+            RESTORING = false;
+            return !!(PUF || NF || PF || FORM || EDIT || RE || PADD || MF);
+          }
+          document.addEventListener('input', draftSoon, true);
+          document.addEventListener('change', draftSoon, true);
+          document.addEventListener('visibilitychange', draftSave);
+          window.addEventListener('pagehide', draftSave);
+
+          /* ---------- expiry ---------- */
+          var XF = '';
+          function xDays(k) { return Math.round((kDate(k) - kDate(dk())) / 86400000); }
+          function xList() {
+            var l = [];
+            S.pu.forEach(function (p) { p.it.forEach(function (i) { if (i.exp && !i.out) l.push({ p: p, i: i, d: xDays(i.exp) }); }); });
+            return l.sort(function (a, b) { return a.d - b.d; });
+          }
+          function xLvl(d) { return d < 0 ? ['\u26d4', '\u0645\u0646\u0642\u0636\u06cc \u0634\u062f\u0647', '#FF5050'] : d == 0 ? ['\u26d4', '\u0627\u0645\u0631\u0648\u0632 \u0622\u062e\u0631\u06cc\u0646 \u0631\u0648\u0632', '#FF5050'] : d <= 10 ? ['\ud83d\udea8', fa(d) + ' \u0631\u0648\u0632 \u0645\u0648\u0646\u062f\u0647', '#FF7B7B'] : d <= 30 ? ['\u26a0\ufe0f', fa(d) + ' \u0631\u0648\u0632 \u0645\u0648\u0646\u062f\u0647', '#E0A040'] : ['\u2705', fa(d) + ' \u0631\u0648\u0632 \u0645\u0648\u0646\u062f\u0647', '#4ED38A']; }
+          function xOut(pid, iid) {
+            var p = puFind(pid); if (!p) return;
+            p.it.forEach(function (i) { if (i.id == iid) i.out = i.out ? 0 : Date.now(); });
+            save(); render(); toast('\u2705 \u062b\u0628\u062a \u0634\u062f\u061b \u0622\u0644\u0627\u0631\u0645\u200c\u0647\u0627\u06cc \u0627\u0646\u0642\u0636\u0627\u06cc \u0627\u06cc\u0646 \u06a9\u0627\u0644\u0627 \u062d\u0630\u0641 \u0634\u062f');
+          }
+          function rExp() {
+            var l = xList(), h = '<div class="box"><div class="row"><h3>\u23f3 \u062a\u0627\u0631\u06cc\u062e \u0627\u0646\u0642\u0636\u0627</h3><span class="mut sm">\u0647\u0634\u062f\u0627\u0631 \u0633\u0627\u0639\u062a ' + fa(S.set.xh || '10:00') + '</span></div>' +
+              '<div class="chips">' + [['', '\u0647\u0645\u0647'], ['30', '\u06f3\u06f0 \u0631\u0648\u0632'], ['10', '\u06f1\u06f0 \u0631\u0648\u0632'], ['0', '\u0645\u0646\u0642\u0636\u06cc/\u0627\u0645\u0631\u0648\u0632']].map(function (c) { return '<span class="chip' + (XF == c[0] ? ' on' : '') + '" onclick="XF=\'' + c[0] + '\';render()">' + c[1] + '</span>'; }).join('') + '</div>';
+            var f = l.filter(function (x) { return XF === '' || x.d <= +XF; });
+            if (!f.length) h += '<div class="mut">' + (l.length ? '\u0686\u06cc\u0632\u06cc \u062a\u0648 \u0627\u06cc\u0646 \u0628\u0627\u0632\u0647 \u0646\u06cc\u0633\u062a \ud83d\udc4c' : '\u0648\u0642\u062a\u06cc \u062a\u0648 \u0641\u0627\u06a9\u062a\u0648\u0631 \u0628\u0631\u0627\u06cc \u06a9\u0627\u0644\u0627 \u062a\u0627\u0631\u06cc\u062e \u0627\u0646\u0642\u0636\u0627 \u0628\u0632\u0646\u06cc\u060c \u0627\u06cc\u0646\u062c\u0627 \u0645\u06cc\u0627\u062f.') + '</div>';
+            f.forEach(function (x) {
+              var v = xLvl(x.d);
+              h += '<div class="task"><div class="row"><b>' + esc(x.i.n) + (x.i.q ? ' <span class="tm">' + fa(x.i.q) + '</span>' : '') + '</b><b style="color:' + v[2] + '">' + v[0] + ' ' + v[1] + '</b></div>' +
+                '<div class="mut sm">\ud83c\udfe2 ' + esc(x.p.co) + ' \u00b7 \u062e\u0631\u06cc\u062f ' + jStr(dk(x.p.t)) + (x.i.pdt ? ' \u00b7 \u062a\u0648\u0644\u06cc\u062f ' + jStr(x.i.pdt, true) : '') + ' \u00b7 \u0627\u0646\u0642\u0636\u0627 <b>' + jStr(x.i.exp, true) + '</b></div>' +
+                '<button class="btn g s" onclick="xOut(\'' + x.p.id + '\',\'' + x.i.id + '\')">\ud83d\udce6 \u062a\u0645\u0648\u0645 \u0634\u062f / \u062a\u0648 \u0645\u063a\u0627\u0632\u0647 \u0646\u06cc\u0633\u062a</button></div>';
+            });
+            var done = []; S.pu.forEach(function (p) { p.it.forEach(function (i) { if (i.exp && i.out) done.push({ p: p, i: i }); }); });
+            if (done.length) h += '<div class="mut sm" style="margin-top:8px">\ud83d\udce6 \u062a\u0645\u0648\u0645\u200c\u0634\u062f\u0647\u200c\u0647\u0627: ' + done.slice(-15).map(function (x) { return esc(x.i.n) + ' <span onclick="xOut(\'' + x.p.id + '\',\'' + x.i.id + '\')">\u21a9\ufe0f</span>'; }).join('\u060c ') + '</div>';
+            return h + '<label><br>\u0633\u0627\u0639\u062a \u0647\u0634\u062f\u0627\u0631\u0647\u0627\u06cc \u0627\u0646\u0642\u0636\u0627</label><input type="time" value="' + esc(S.set.xh || '10:00') + '" onchange="S.set.xh=this.value;save()"><div class="mut sm">\u0647\u0634\u062f\u0627\u0631 \u0627\u0648\u0644 \u06f3\u06f0 \u0631\u0648\u0632 \u0645\u0648\u0646\u062f\u0647\u060c \u0647\u0634\u062f\u0627\u0631 \u062f\u0648\u0645 (\u062c\u062f\u06cc\u200c\u062a\u0631) \u06f1\u06f0 \u0631\u0648\u0632 \u0645\u0648\u0646\u062f\u0647\u060c \u0647\u0634\u062f\u0627\u0631 \u0622\u062e\u0631 \u0631\u0648\u0632 \u0627\u0646\u0642\u0636\u0627 \u06a9\u0647 \u0627\u06af\u0647 \u0645\u0648\u0646\u062f\u0647 \u0627\u0632 \u0645\u063a\u0627\u0632\u0647 \u0628\u0631\u0634 \u062f\u0627\u0631\u06cc. \u00ab\u062a\u0645\u0648\u0645 \u0634\u062f\u00bb \u0647\u0645\u0647 \u0647\u0634\u062f\u0627\u0631\u0647\u0627\u06cc \u0627\u0648\u0646 \u06a9\u0627\u0644\u0627 \u0631\u0648 \u062d\u0630\u0641 \u0645\u06cc\u200c\u06a9\u0646\u0647.</div></div>';
+          }
+          function xAlarms(add) {
+            var now = Date.now(), lim = now + 45 * 86400000, hm = S.set.xh || '10:00';
+            xList().forEach(function (x) {
+              var i = x.i, base = 'x' + i.id;
+              [[30, '1', '\u26a0\ufe0f \u06f3\u06f0 \u0631\u0648\u0632 \u062a\u0627 \u0627\u0646\u0642\u0636\u0627: ', '\u062a\u0627\u0631\u06cc\u062e \u0627\u0646\u0642\u0636\u0627 ' + jStr(i.exp, true) + '. \u0628\u0631\u0646\u0627\u0645\u0647 \u0641\u0631\u0648\u0634\u0634 \u0631\u0648 \u0628\u0686\u06cc\u0646'], [10, '2', '\ud83d\udea8 \u0641\u0642\u0637 \u06f1\u06f0 \u0631\u0648\u0632 \u062a\u0627 \u0627\u0646\u0642\u0636\u0627: ', '\u0627\u0646\u0642\u0636\u0627 ' + jStr(i.exp, true) + '. \u0627\u06af\u0647 \u0645\u0648\u0646\u062f\u0647\u060c \u0632\u0648\u062f\u062a\u0631 \u0628\u0641\u0631\u0648\u0634\u0634 \u06cc\u0627 \u0645\u0631\u062c\u0648\u0639 \u06a9\u0646'], [0, '3', '\u26d4 \u0627\u0645\u0631\u0648\u0632 \u0631\u0648\u0632 \u0627\u0646\u0642\u0636\u0627\u0633\u062a: ', '\u0627\u06af\u0647 \u0647\u0646\u0648\u0632 \u0645\u0648\u062c\u0648\u062f\u0647\u060c \u0627\u0632 \u0642\u0641\u0633\u0647 \u0645\u063a\u0627\u0632\u0647 \u0628\u0631\u0634 \u062f\u0627\u0631']].forEach(function (s) {
+                var t = tsOf(addD(i.exp, -s[0]), hm);
+                if (t > now && t < lim) add(base + s[1], t, s[2] + i.n, s[3] + ' \u00b7 \ud83c\udfe2 ' + x.p.co);
+              });
+            });
+          }
+          function xWarnBox() {
+            var l = xList().filter(function (x) { return x.d <= 10; });
+            if (!l.length) return '';
+            return '<div class="box warn"><div class="row"><h3>\ud83d\udea8 \u0627\u0646\u0642\u0636\u0627\u06cc \u0646\u0632\u062f\u06cc\u06a9</h3><span class="chip" onclick="BSUB=\'ex\';go(\'need\')">\u0647\u0645\u0647</span></div>' + l.slice(0, 5).map(function (x) { var v = xLvl(x.d); return '<div class="row sm"><span>' + esc(x.i.n) + '</span><b style="color:' + v[2] + '">' + v[0] + ' ' + v[1] + '</b></div>'; }).join('') + '</div>';
+          }
+
+          /* ---------- products: latest invoice, edit & delete ---------- */
+          var PRO = null, PRE = null;
+          function prodLatest(o) { var hh = o.h; return hh[hh.length - 1]; }
+          function prEdit(pid, iid) { var p = puFind(pid), it = null; p.it.forEach(function (i) { if (i.id == iid) it = i; }); if (!it) return; PRE = { pid: pid, iid: iid, n: it.n, b: it.b, s: it.s }; var e = $('prl'); if (e) e.innerHTML = prodList(); }
+          function prSave() {
+            var p = puFind(PRE.pid); if (!p) return;
+            p.it.forEach(function (i) { if (i.id == PRE.iid) { i.n = trim($('preN').value) || i.n; i.b = numM($('preB').value); i.s = numM($('preS').value); } });
+            PRE = null; save(); render(); toast('\u2705 \u0648\u06cc\u0631\u0627\u06cc\u0634 \u0634\u062f (\u062a\u0648\u06cc \u0647\u0645\u0648\u0646 \u0641\u0627\u06a9\u062a\u0648\u0631 \u0647\u0645 \u0639\u0648\u0636 \u0634\u062f)');
+          }
+          function prDel(pid, iid) {
+            var p = puFind(pid); if (!p) return;
+            var it = null; p.it.forEach(function (i) { if (i.id == iid) it = i; });
+            if (!it || !confirm('\u00ab' + it.n + '\u00bb \u0627\u0632 \u0641\u0627\u06a9\u062a\u0648\u0631 ' + p.co + ' (' + jStr(dk(p.t)) + ') \u062d\u0630\u0641 \u0628\u0634\u0647\u061f' + (p.it.length == 1 ? '\n\u0627\u06cc\u0646 \u062a\u0646\u0647\u0627 \u06a9\u0627\u0644\u0627\u06cc \u0641\u0627\u06a9\u062a\u0648\u0631\u0647\u061b \u06a9\u0644 \u0641\u0627\u06a9\u062a\u0648\u0631 \u0647\u0645 \u062d\u0630\u0641 \u0645\u06cc\u0634\u0647.' : ''))) return;
+            p.it = p.it.filter(function (i) { return i.id != iid; });
+            if (!p.it.length) { (p.ph || []).forEach(function (f) { try { Android.imgDel(f); } catch (e) {} }); S.pu = S.pu.filter(function (x) { return x.id != pid; }); }
+            save(); render(); toast('\ud83d\uddd1 \u062d\u0630\u0641 \u0634\u062f');
+          }
+
           /* ---------- start ---------- */
           if (!S.v2) { for (var i0 = 0; i0 < 7; i0++) { try { Android.cancelAlarm('m' + i0); Android.cancelAlarm('n' + i0); } catch (e) {} } S.v2 = 1; S.v = 2; sv('life1', S); }
           snap();
-          render();
+          if (!draftLoad()) render();
           remind();
           setTimeout(function () { checkUpdate(false); }, 1500);
           var LASTK = dk();
-          setInterval(function () { var ae = document.activeElement; if (TAB == 'today' && !FORM && !EDIT && !RP && !WEDIT && !CAL && !(ae && /INPUT|TEXTAREA/.test(ae.tagName))) { var y = window.scrollY; render(); window.scrollTo(0, y); } }, 60000);
+          setInterval(function () { var ae = document.activeElement; if (TAB == 'today' && !FORM && !EDIT && !RP && !WEDIT && !CAL && !VC && !(ae && /INPUT|TEXTAREA/.test(ae.tagName))) { var y = window.scrollY; render(); window.scrollTo(0, y); } }, 60000);
           setInterval(function () { var k = dk(); if (k != LASTK) { if (SEL == LASTK) SEL = k; LASTK = k; RV = null; snap(); remind(); if (!FORM && !EDIT && !MF && !RE) render(); } }, 60000);
           </script>
           </body>
