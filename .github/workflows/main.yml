@@ -2100,7 +2100,7 @@ jobs:
                 '<label>عنوان</label><input id="nTitle" value="'+esc(x.title)+'" placeholder="مثلاً ایده، قرار یا کاری که نباید فراموش کنم">'+
                 '<label>متن یادداشت</label><textarea id="nBody" style="min-height:130px">'+esc(x.body)+'</textarea>'+
                 '<label>دسته‌بندی</label><select id="nCat" style="width:100%">'+NOTE_CATS.map(function(c){return '<option'+(x.cat==c?' selected':'')+'>'+c+'</option>';}).join('')+'</select>'+
-                '<div class="row"><div class="f1"><label>تاریخ یادآوری</label><input id="nDue" type="date" value="'+esc(x.due||'')+'"></div><div class="f1"><label>ساعت</label><input id="nTm" type="time" value="'+esc(x.tm||'09:00')+'"></div></div>'+
+                '<div class="row"><div class="f1"><label>تاریخ یادآوری (شمسی)</label>'+dField('nDue','nDueLbl',x.due,'📅 انتخاب تاریخ شمسی')+'</div><div class="f1"><label>ساعت</label><input id="nTm" type="time" value="'+esc(x.tm||'09:00')+'"></div></div>'+
                 '<label><input type="checkbox" id="nAl"'+(x.al?' checked':'')+'> 🔔 آلارم در تاریخ و ساعت بالا</label>'+
                 '<label>تکرار یادآوری</label><select id="nRep" style="width:100%"><option value="none"'+(x.rep=='none'?' selected':'')+'>بدون تکرار</option><option value="daily"'+(x.rep=='daily'?' selected':'')+'>هر روز</option><option value="weekly"'+(x.rep=='weekly'?' selected':'')+'>هر هفته</option></select>'+
                 '<label><input type="checkbox" id="nPin"'+(x.pin?' checked':'')+'> 📌 سنجاق به بالای فهرست</label>'+
