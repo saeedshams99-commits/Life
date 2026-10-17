@@ -1499,7 +1499,7 @@ jobs:
           var WDS = ['\u06cc', '\u062f', '\u0633', '\u0686', '\u067e', '\u062c', '\u0634'];
           var WORD = [6, 0, 1, 2, 3, 4, 5];
           var MOODS = [['anx', '\ud83d\ude30', '\u0627\u0636\u0637\u0631\u0627\u0628', -1], ['str', '\ud83d\ude23', '\u0627\u0633\u062a\u0631\u0633', -1], ['nrv', '\ud83d\ude24', '\u0641\u0634\u0627\u0631 \u0639\u0635\u0628\u06cc', -1], ['ang', '\ud83d\ude20', '\u062e\u0634\u0645', -1], ['sad', '\ud83d\ude14', '\u063a\u0645', -1], ['tir', '\ud83e\udd71', '\u062e\u0633\u062a\u06af\u06cc', -1], ['calm', '\ud83d\ude0c', '\u0622\u0631\u0627\u0645\u0634', 1], ['hap', '\ud83d\ude42', '\u062e\u0648\u0634\u062d\u0627\u0644\u06cc', 1], ['joy', '\ud83d\ude04', '\u0634\u0627\u062f\u06cc', 1]];
-          var TABS = [['today', '\u2600\ufe0f', '\u0631\u0648\u0632'], ['mood', '\ud83d\udcad', '\u0627\u062d\u0648\u0627\u0644'], ['ppl', '\ud83d\udc65', '\u0622\u062f\u0645\u200c\u0647\u0627'], ['need', '\ud83d\uded2', '\u062e\u0631\u06cc\u062f'], ['trend', '\ud83d\udcca', '\u062a\u062d\u0644\u06cc\u0644'], ['set', '\u2699\ufe0f', '\u062a\u0646\u0638\u06cc\u0645\u0627\u062a']];
+          var TABS = [['today', '\u2600\ufe0f', '\u0631\u0648\u0632'], ['notes', '\ud83d\udcdd', '\u06cc\u0627\u062f\u062f\u0627\u0634\u062a'], ['mood', '\ud83d\udcad', '\u0627\u062d\u0648\u0627\u0644'], ['ppl', '\ud83d\udc65', '\u0622\u062f\u0645\u200c\u0647\u0627'], ['need', '\ud83d\uded2', '\u062e\u0631\u06cc\u062f'], ['trend', '\ud83d\udcca', '\u062a\u062d\u0644\u06cc\u0644'], ['set', '\u2699\ufe0f', '\u062a\u0646\u0638\u06cc\u0645\u0627\u062a']];
           var DEF_PROMPT = '\u062a\u0648 \u0633\u06cc\u0633\u062a\u0645 \u0645\u062f\u06cc\u0631\u06cc\u062a \u0632\u0646\u062f\u06af\u06cc \u0634\u062e\u0635\u06cc\u060c \u0645\u0631\u0628\u06cc \u0627\u062c\u0631\u0627\u06cc\u06cc \u0648 \u062f\u0633\u062a\u06cc\u0627\u0631 \u062a\u0635\u0645\u06cc\u0645\u200c\u06af\u06cc\u0631\u06cc \u0645\u0646 \u0647\u0633\u062a\u06cc. \u0647\u062f\u0641: \u062a\u0628\u062f\u06cc\u0644 \u0647\u062f\u0641 \u0628\u0647 \u0627\u0642\u062f\u0627\u0645 \u0648\u0627\u0642\u0639\u06cc \u0648 \u0633\u0646\u062c\u06cc\u062f\u0646 \u0646\u062a\u06cc\u062c\u0647\u060c \u0646\u0647 \u0627\u0646\u06af\u06cc\u0632\u0647 \u062f\u0627\u062f\u0646.\n' +
             '\u0642\u0648\u0627\u0639\u062f:\n' +
             '\u06f1. \u0631\u0641\u062a\u0627\u0631 \u062b\u0628\u062a\u200c\u0634\u062f\u0647 \u0627\u0632 \u0646\u06cc\u062a \u0627\u0639\u0644\u0627\u0645\u200c\u0634\u062f\u0647 \u0645\u0639\u062a\u0628\u0631\u062a\u0631\u0647\u060c \u0648\u0644\u06cc \u06cc\u0647 \u0631\u0648\u0632 \u0628\u062f \u0645\u0639\u0631\u0641 \u0634\u062e\u0635\u06cc\u062a \u0645\u0646 \u0646\u06cc\u0633\u062a.\n' +
@@ -1545,6 +1545,8 @@ jobs:
             ];
             if (!S.ppl) S.ppl = [];
             if (!S.nd) S.nd = [];
+            if (!S.notes) S.notes = [];
+            S.notes.forEach(function (n) { if (!n.ph) n.ph = []; if (n.pin === undefined) n.pin = false; if (n.done === undefined) n.done = false; if (!n.cat) n.cat = 'شخصی'; if (!n.rep) n.rep = 'none'; });
             if (!S.pu) S.pu = [];
             S.pu.forEach(function (p) { (p.it || []).forEach(function (i) { if (!i.id) i.id = 'i' + Date.now().toString(36) + Math.floor(Math.random() * 1e8).toString(36); }); });
             if (!S.secs) S.secs = [{ id: 'shop', n: '\ud83c\udfea \u0645\u063a\u0627\u0632\u0647' }, { id: 'home', n: '\ud83c\udfe0 \u062e\u0627\u0646\u0647' }, { id: 'me', n: '\ud83d\udc64 \u0634\u062e\u0635\u06cc' }];
@@ -1794,6 +1796,7 @@ jobs:
 
           /* ---------- UI state ---------- */
           var SEL = dk(), TAB = 'today', EDIT = null, FORM = false, RP = false, CAL = null, MF = null, MDALL = false, RE = null, RV = null;
+          var NF = null, NQ = '', NCAT = '', NDONE = false;
           function go(t) { vcEnd(); VC = null; TAB = t; EDIT = null; FORM = false; RP = false; MF = null; RE = null; PF = null; NF = null; SED = null; PADD = ''; (PUF && PUF.nph || []).forEach(function (id) { try { Android.imgDel(id); } catch (e) {} }); PUF = null; WEDIT = false; if (t != 'ppl') PP = null; render(); window.scrollTo(0, 0); }
           function appBack() {
             if (PV) { pvClose(); return true; }
@@ -1819,9 +1822,9 @@ jobs:
             nav();
             var j = jOf(SEL), t = SEL == dk();
             $('dt').innerHTML = '\ud83d\udcc5 ' + (t ? '\u0627\u0645\u0631\u0648\u0632\u060c ' : '') + WD[kDate(SEL).getDay()] + ' ' + fa(j[2]) + ' ' + MON[j[1] - 1];
-            $('ttl').textContent = { today: '\u2600\ufe0f \u0631\u0648\u0632', mood: '\ud83d\udcad \u0627\u062d\u0648\u0627\u0644', night: '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc', trend: '\ud83d\udcca \u062a\u062d\u0644\u06cc\u0644', ai: '\ud83d\udcca \u062a\u062d\u0644\u06cc\u0644', set: '\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a', ppl: '\ud83d\udc65 \u0622\u062f\u0645\u200c\u0647\u0627', need: '\ud83d\uded2 \u062e\u0631\u06cc\u062f \u0648 \u0646\u06cc\u0627\u0632\u0647\u0627' }[TAB];
+            $('ttl').textContent = { today: '\u2600\ufe0f \u0631\u0648\u0632', notes: '\ud83d\udcdd \u06cc\u0627\u062f\u062f\u0627\u0634\u062a \u0645\u0646', mood: '\ud83d\udcad \u0627\u062d\u0648\u0627\u0644', night: '\ud83c\udf19 \u0628\u0627\u0632\u0628\u06cc\u0646\u06cc', trend: '\ud83d\udcca \u062a\u062d\u0644\u06cc\u0644', ai: '\ud83d\udcca \u062a\u062d\u0644\u06cc\u0644', set: '\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a', ppl: '\ud83d\udc65 \u0622\u062f\u0645\u200c\u0647\u0627', need: '\ud83d\uded2 \u062e\u0631\u06cc\u062f \u0648 \u0646\u06cc\u0627\u0632\u0647\u0627' }[TAB];
             draftSoon();
-            $('pg').innerHTML = { today: rToday, mood: rMood, night: rNight, trend: rTrendAll, ai: rTrendAll, set: rSet, ppl: rPpl, need: rBuy }[TAB]();
+            $('pg').innerHTML = { today: rToday, notes: rNotes, mood: rMood, night: rNight, trend: rTrendAll, ai: rTrendAll, set: rSet, ppl: rPpl, need: rBuy }[TAB]();
           }
 
           /* ---------- calendar ---------- */
@@ -1856,6 +1859,7 @@ jobs:
           /* ---------- today ---------- */
           function rToday() {
             var k = SEL, D = day(k), isT = k == dk(), h = '';
+            h += nTodayBox(k);
             if (!isT) h += '<div class="box ' + (k > dk() ? 'ok' : 'low') + '"><div class="row"><span>' + (k > dk() ? '\ud83d\uddd3 \u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc \u0628\u0631\u0627\u06cc ' : '\ud83d\udd70 \u062f\u0627\u0631\u06cc \u0631\u0648\u0632 \u06af\u0630\u0634\u062a\u0647 \u0631\u0648 \u0645\u06cc\u200c\u0628\u06cc\u0646\u06cc: ') + jStr(k, true) + '</span><button class="btn s" onclick="setSel(dk())">\u0628\u0631\u0648 \u0627\u0645\u0631\u0648\u0632</button></div></div>';
             if (isT && Object.keys(S.days).length >= 3 && Date.now() - (S.set.lb || 0) > 7 * 86400000) h += '<div class="box warn"><div class="row"><span>\ud83d\udcbe \u0628\u06cc\u0634\u062a\u0631 \u0627\u0632 \u06cc\u0647 \u0647\u0641\u062a\u0647\u200c\u0633\u062a \u067e\u0634\u062a\u06cc\u0628\u0627\u0646 \u0646\u06af\u0631\u0641\u062a\u06cc</span><button class="btn s" onclick="shareB()">\ud83d\udce4 \u0627\u0631\u0633\u0627\u0644 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646</button></div></div>';
             if (isT && !D.tasks.length) {
@@ -2073,6 +2077,49 @@ jobs:
             S.md = S.md.filter(function (x) { return m.g ? x.g != m.g : x.id != id; }); save(); render();
           }
 
+          /* ---------- personal notes ---------- */
+          var NOTE_CATS = ['شخصی','کار','ایده','خرید','قرار','مهم','یادگیری','سایر'];
+          function nFind(id) { for (var i=0;i<S.notes.length;i++) if (S.notes[i].id==id) return S.notes[i]; return null; }
+          function nNew() { NF={id:'',title:'',body:'',cat:'شخصی',created:Date.now(),due:'',tm:'09:00',al:false,rep:'none',pin:false,done:false,ph:[]}; render(); }
+          function nEdit(id) { var n=nFind(id); if (!n) return; NF=JSON.parse(JSON.stringify(n)); if (!NF.ph) NF.ph=[]; render(); }
+          function nGrab() { if (!NF || !$('nTitle')) return; NF.title=$('nTitle').value; NF.body=$('nBody').value; NF.cat=$('nCat').value; NF.due=$('nDue').value; NF.tm=$('nTm').value||'09:00'; NF.al=$('nAl').checked; NF.rep=$('nRep').value; NF.pin=$('nPin').checked; }
+          function nPhoto() { nGrab(); var id='note'+uid(), cb='noteimg'+(++CBN); CBS[cb]=function(r){var got='';try{got=Android.imgTake();}catch(e){} if(r && r.ok && got){NF.ph=NF.ph||[];NF.ph.push(got);render();toast('📷 عکس اضافه شد');}else toast('عکس اضافه نشد؛ دوباره تلاش کن');}; try{Android.imgGal(id,cb);}catch(e){delete CBS[cb];toast('انتخاب عکس در دسترس نیست');} }
+          function nPhotoDel(id) { if(!confirm('این عکس از یادداشت حذف شود؟')) return; NF.ph=(NF.ph||[]).filter(function(x){if(x==id){try{Android.imgDel(x);}catch(e){} return false;}return true;}); render(); }
+          function nSave() { nGrab(); NF.title=trim(NF.title); NF.body=trim(NF.body); if(!NF.title && !NF.body && !(NF.ph||[]).length){toast('عنوان، متن یا حداقل یک عکس اضافه کن');return;} if(NF.al && (!NF.due || !NF.tm)){toast('برای آلارم تاریخ و ساعت را مشخص کن');return;} var old=NF.id?nFind(NF.id):null; if(old){for(var k=0;k<S.notes.length;k++)if(S.notes[k].id==NF.id)S.notes[k]=NF;} else {NF.id='n'+uid();NF.created=Date.now();S.notes.push(NF);} NF=null; save(); render(); toast('✅ یادداشت ذخیره شد'); }
+          function nCancel(){NF=null;render();}
+          function nDel(id) { var n=nFind(id); if(!n||!confirm('یادداشت «'+(n.title||'بدون عنوان')+'» حذف شود؟'))return; (n.ph||[]).forEach(function(x){try{Android.imgDel(x);}catch(e){}}); S.notes=S.notes.filter(function(x){return x.id!=id;}); save();render();toast('یادداشت حذف شد'); }
+          function nDone(id) { var n=nFind(id);if(!n)return;n.done=!n.done;save();render(); }
+          function nPin(id) { var n=nFind(id);if(!n)return;n.pin=!n.pin;save();render(); }
+          function nImage(id) { var u='';try{u=Android.imgPath(id);}catch(e){} return u?'<img src="'+esc(u)+'" style="width:82px;height:82px;object-fit:cover;border-radius:9px;margin:3px" onclick="try{Android.imgView(\''+id+'\')}catch(e){}">':''; }
+          function nCard(n) { var due=n.due?('<div class="sm" style="color:'+(n.done?'#4ED38A':(n.due<dk()?'#FF7B7B':'#E0A040'))+'">'+(n.al?'🔔 ':'📅 ')+jStr(n.due,true)+(n.tm?' · '+fa(n.tm):'')+(n.rep&&n.rep!='none'?' · '+(n.rep=='daily'?'هر روز':'هر هفته'):'')+'</div>'):''; return '<div class="task" style="border-right:3px solid '+(n.done?'#4ED38A':n.pin?'#E0A040':'#30445f')+'"><div class="row"><b style="text-decoration:'+(n.done?'line-through':'none')+'">'+(n.pin?'📌 ':'')+esc(n.title||'بدون عنوان')+'</b><span class="sm">'+esc(n.cat||'شخصی')+'</span></div>'+(n.body?'<div style="white-space:pre-wrap;margin:6px 0">'+esc(n.body)+'</div>':'')+((n.ph||[]).length?'<div style="display:flex;flex-wrap:wrap">'+n.ph.map(nImage).join('')+'</div>':'')+due+'<div class="row" style="margin-top:7px"><span><button class="btn g s" onclick="nEdit(\''+n.id+'\')">✏️ ویرایش</button> <button class="btn g s" onclick="nDone(\''+n.id+'\')">'+(n.done?'↩️ بازکردن':'✅ انجام شد')+'</button></span><span><button class="btn g s" onclick="nPin(\''+n.id+'\')">'+(n.pin?'برداشتن سنجاق':'📌 مهم')+'</button> <button class="btn r s" onclick="nDel(\''+n.id+'\')">🗑</button></span></div></div>'; }
+          function rNotes() {
+            var h='';
+            if (NF) {
+              var x=NF;
+              h+='<div class="box"><h3>'+(x.id?'✏️ ویرایش یادداشت':'➕ یادداشت جدید')+'</h3>'+
+                '<label>عنوان</label><input id="nTitle" value="'+esc(x.title)+'" placeholder="مثلاً ایده، قرار یا کاری که نباید فراموش کنم">'+
+                '<label>متن یادداشت</label><textarea id="nBody" style="min-height:130px">'+esc(x.body)+'</textarea>'+
+                '<label>دسته‌بندی</label><select id="nCat" style="width:100%">'+NOTE_CATS.map(function(c){return '<option'+(x.cat==c?' selected':'')+'>'+c+'</option>';}).join('')+'</select>'+
+                '<div class="row"><div class="f1"><label>تاریخ یادآوری</label><input id="nDue" type="date" value="'+esc(x.due||'')+'"></div><div class="f1"><label>ساعت</label><input id="nTm" type="time" value="'+esc(x.tm||'09:00')+'"></div></div>'+
+                '<label><input type="checkbox" id="nAl"'+(x.al?' checked':'')+'> 🔔 آلارم در تاریخ و ساعت بالا</label>'+
+                '<label>تکرار یادآوری</label><select id="nRep" style="width:100%"><option value="none"'+(x.rep=='none'?' selected':'')+'>بدون تکرار</option><option value="daily"'+(x.rep=='daily'?' selected':'')+'>هر روز</option><option value="weekly"'+(x.rep=='weekly'?' selected':'')+'>هر هفته</option></select>'+
+                '<label><input type="checkbox" id="nPin"'+(x.pin?' checked':'')+'> 📌 سنجاق به بالای فهرست</label>'+
+                '<div class="row"><b>عکس‌ها ('+fa((x.ph||[]).length)+')</b><button class="btn g s" onclick="nPhoto()">📷 افزودن عکس از گالری</button></div>';
+              if ((x.ph||[]).length) h+='<div style="display:flex;flex-wrap:wrap">'+x.ph.map(function(id){return '<div>'+nImage(id)+'<button class="btn r s" onclick="nPhotoDel(\''+id+'\')">حذف عکس</button></div>';}).join('')+'</div>';
+              h+='<button class="btn" onclick="nSave()">💾 ذخیره یادداشت</button> <button class="btn g" onclick="nCancel()">انصراف</button></div>';
+              return h;
+            }
+            h+='<div class="box"><div class="row"><b>📝 دفترچه یادداشت</b><button class="btn s" onclick="nNew()">➕ یادداشت جدید</button></div>'+
+              '<input value="'+esc(NQ)+'" placeholder="🔎 جست‌وجوی عنوان و متن" oninput="NQ=this.value;var y=window.scrollY;render();window.scrollTo(0,y)"><div class="chips">'+
+              '<span class="chip'+(!NCAT?' on':'')+'" onclick="NCAT=\'\';render()">همه دسته‌ها</span>'+NOTE_CATS.map(function(c){return '<span class="chip'+(NCAT==c?' on':'')+'" onclick="NCAT=\''+c+'\';render()">'+c+'</span>';}).join('')+
+              '<span class="chip'+(NDONE?' on':'')+'" onclick="NDONE=!NDONE;render()">'+(NDONE?'نمایش انجام‌شده‌ها':'فقط بازها')+'</span></div></div>';
+            var q=trim(NQ).toLowerCase(),list=S.notes.filter(function(n){return (!NCAT||n.cat==NCAT)&&(!NDONE?!n.done:true)&&(!q||((n.title||'')+' '+(n.body||'')+' '+(n.cat||'')).toLowerCase().indexOf(q)>=0);});
+            list.sort(function(a,b){return (+!!b.pin)-(+!!a.pin)||(+!!a.done)-(+!!b.done)||(a.due||'9999').localeCompare(b.due||'9999')||b.created-a.created;});
+            if(!list.length)h+='<div class="box mut">یادداشتی پیدا نشد. برای شروع «یادداشت جدید» را بزن.</div>';else list.forEach(function(n){h+=nCard(n);});
+            return h;
+          }
+          function nDueOn(n,k) { if(!n.due || k<n.due)return false; if(n.rep=='daily')return true; if(n.rep=='weekly')return ((new Date(k+'T12:00:00').getDay()-new Date(n.due+'T12:00:00').getDay()+7)%7)==0; return n.due==k; }
+          function nTodayBox(k) { var a=S.notes.filter(function(n){return !n.done&&nDueOn(n,k);}).sort(function(x,y){return (x.tm||'').localeCompare(y.tm||'');}); if(!a.length)return ''; return '<div class="box"><div class="row"><h3>📝 یادداشت‌های امروز</h3><button class="btn g s" onclick="go(\'notes\')">همه یادداشت‌ها</button></div>'+a.map(function(n){return '<div class="row task"><span>'+((n.al)?'🔔 ':'📌 ')+esc(n.title||'بدون عنوان')+' <span class="mut sm">'+fa(n.tm||'')+'</span></span><button class="btn g s" onclick="nDone(\''+n.id+'\')">انجام شد</button></div>';}).join('')+'</div>'; }
           /* ---------- night ---------- */
           function rNight() {
             var k = SEL, D = day(k), v = RV || (D.rv ? JSON.parse(JSON.stringify(D.rv)) : { ob: [], sc: 0, res: '', obt: '', hyp: '', drop: '', next: '' });
@@ -2264,6 +2311,7 @@ jobs:
               S.ppl.forEach(function (p) { (p.lg || []).forEach(function (e) { if (e.due == k && e.dal && !e.dn) add('d' + e.id, dueTs(e), (LG[e.ty][2] > 0 ? '\ud83d\udcb0 \u0633\u0631\u0631\u0633\u06cc\u062f \u0637\u0644\u0628 \u0627\u0632 ' : '\ud83d\udcb8 \u0633\u0631\u0631\u0633\u06cc\u062f \u0628\u062f\u0647\u06cc \u0628\u0647 ') + p.n, fmtN(numM(e.a)) + ' \u062a\u0648\u0645\u0627\u0646' + (e.it ? ' \u00b7 ' + e.it : '')); }); });
               if (i < 2) rtFor(k).forEach(function (x) { if (x.r.al && !(D && D.rt[x.key])) add('r' + k + x.key, tsOf(k, x.tm), '\ud83d\udccc ' + x.r.n, '\u0633\u0627\u0639\u062a ' + fa(x.tm) + '\u060c \u0627\u0646\u062c\u0627\u0645\u0634 \u062f\u0627\u062f\u06cc \u062a\u06cc\u06a9 \u0628\u0632\u0646', x.r.vc); });
             })(addD(k0, i), i);
+            S.notes.forEach(function(n) { if (!n.al || n.done || !n.due) return; var base=n.due>k0?n.due:k0; for (var ni=0;ni<8;ni++) { var nk=addD(base,ni); if (nDueOn(n,nk)) add('note'+n.id+'_'+nk,tsOf(nk,n.tm||'09:00'),'📝 '+(n.title||'یادداشت'),(n.body||'یادآوری یادداشت').substring(0,180),'',true); } });
             xAlarms(add);
             return w;
           }
