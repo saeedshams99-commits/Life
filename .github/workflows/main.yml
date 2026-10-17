@@ -2092,6 +2092,13 @@ jobs:
           function nPin(id) { var n=nFind(id);if(!n)return;n.pin=!n.pin;save();render(); }
           function nImage(id) { var u='';try{u=Android.imgPath(id);}catch(e){} return u?'<img src="'+esc(u)+'" style="width:82px;height:82px;object-fit:cover;border-radius:9px;margin:3px" onclick="try{Android.imgView(\''+id+'\')}catch(e){}">':''; }
           function nCard(n) { var due=n.due?('<div class="sm" style="color:'+(n.done?'#4ED38A':(n.due<dk()?'#FF7B7B':'#E0A040'))+'">'+(n.al?'🔔 ':'📅 ')+jStr(n.due,true)+(n.tm?' · '+fa(n.tm):'')+(n.rep&&n.rep!='none'?' · '+(n.rep=='daily'?'هر روز':'هر هفته'):'')+'</div>'):''; return '<div class="task" style="border-right:3px solid '+(n.done?'#4ED38A':n.pin?'#E0A040':'#30445f')+'"><div class="row"><b style="text-decoration:'+(n.done?'line-through':'none')+'">'+(n.pin?'📌 ':'')+esc(n.title||'بدون عنوان')+'</b><span class="sm">'+esc(n.cat||'شخصی')+'</span></div>'+(n.body?'<div style="white-space:pre-wrap;margin:6px 0">'+esc(n.body)+'</div>':'')+((n.ph||[]).length?'<div style="display:flex;flex-wrap:wrap">'+n.ph.map(nImage).join('')+'</div>':'')+due+'<div class="row" style="margin-top:7px"><span><button class="btn g s" onclick="nEdit(\''+n.id+'\')">✏️ ویرایش</button> <button class="btn g s" onclick="nDone(\''+n.id+'\')">'+(n.done?'↩️ بازکردن':'✅ انجام شد')+'</button></span><span><button class="btn g s" onclick="nPin(\''+n.id+'\')">'+(n.pin?'برداشتن سنجاق':'📌 مهم')+'</button> <button class="btn r s" onclick="nDel(\''+n.id+'\')">🗑</button></span></div></div>'; }
+          function nResults() {
+            var h='',q=trim(NQ).toLowerCase(),list=S.notes.filter(function(n){return (!NCAT||n.cat==NCAT)&&(!NDONE?!n.done:true)&&(!q||((n.title||'')+' '+(n.body||'')+' '+(n.cat||'')).toLowerCase().indexOf(q)>=0);});
+            list.sort(function(a,b){return (+!!b.pin)-(+!!a.pin)||(+!!a.done)-(+!!b.done)||(a.due||'9999').localeCompare(b.due||'9999')||b.created-a.created;});
+            if(!list.length)h+='<div class="box mut">یادداشتی پیدا نشد. برای شروع «یادداشت جدید» را بزن.</div>';else list.forEach(function(n){h+=nCard(n);});
+            return h;
+          }
+          function nSearchRender() { var e=$('noteResults'); if(e)e.innerHTML=nResults(); }
           function rNotes() {
             var h='';
             if (NF) {
@@ -2110,14 +2117,12 @@ jobs:
               return h;
             }
             h+='<div class="box"><div class="row"><b>📝 دفترچه یادداشت</b><button class="btn s" onclick="nNew()">➕ یادداشت جدید</button></div>'+
-              '<input value="'+esc(NQ)+'" placeholder="🔎 جست‌وجوی عنوان و متن" oninput="NQ=this.value;var y=window.scrollY;render();window.scrollTo(0,y)"><div class="chips">'+
+              '<input id="noteSearch" value="'+esc(NQ)+'" placeholder="🔎 جست‌وجوی عنوان و متن" oninput="NQ=this.value;nSearchRender()"><div class="chips">'+
               '<span class="chip'+(!NCAT?' on':'')+'" onclick="NCAT=\'\';render()">همه دسته‌ها</span>'+NOTE_CATS.map(function(c){return '<span class="chip'+(NCAT==c?' on':'')+'" onclick="NCAT=\''+c+'\';render()">'+c+'</span>';}).join('')+
-              '<span class="chip'+(NDONE?' on':'')+'" onclick="NDONE=!NDONE;render()">'+(NDONE?'نمایش انجام‌شده‌ها':'فقط بازها')+'</span></div></div>';
-            var q=trim(NQ).toLowerCase(),list=S.notes.filter(function(n){return (!NCAT||n.cat==NCAT)&&(!NDONE?!n.done:true)&&(!q||((n.title||'')+' '+(n.body||'')+' '+(n.cat||'')).toLowerCase().indexOf(q)>=0);});
-            list.sort(function(a,b){return (+!!b.pin)-(+!!a.pin)||(+!!a.done)-(+!!b.done)||(a.due||'9999').localeCompare(b.due||'9999')||b.created-a.created;});
-            if(!list.length)h+='<div class="box mut">یادداشتی پیدا نشد. برای شروع «یادداشت جدید» را بزن.</div>';else list.forEach(function(n){h+=nCard(n);});
+              '<span class="chip'+(NDONE?' on':'')+'" onclick="NDONE=!NDONE;render()">'+(NDONE?'نمایش انجام‌شده‌ها':'فقط بازها')+'</span></div></div><div id="noteResults">'+nResults()+'</div>';
             return h;
           }
+
           function nDueOn(n,k) { if(!n.due || k<n.due)return false; if(n.rep=='daily')return true; if(n.rep=='weekly')return ((new Date(k+'T12:00:00').getDay()-new Date(n.due+'T12:00:00').getDay()+7)%7)==0; return n.due==k; }
           function nTodayBox(k) { var a=S.notes.filter(function(n){return !n.done&&nDueOn(n,k);}).sort(function(x,y){return (x.tm||'').localeCompare(y.tm||'');}); if(!a.length)return ''; return '<div class="box"><div class="row"><h3>📝 یادداشت‌های امروز</h3><button class="btn g s" onclick="go(\'notes\')">همه یادداشت‌ها</button></div>'+a.map(function(n){return '<div class="row task"><span>'+((n.al)?'🔔 ':'📌 ')+esc(n.title||'بدون عنوان')+' <span class="mut sm">'+fa(n.tm||'')+'</span></span><button class="btn g s" onclick="nDone(\''+n.id+'\')">انجام شد</button></div>';}).join('')+'</div>'; }
           /* ---------- night ---------- */
